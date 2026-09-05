@@ -1,0 +1,28 @@
+# Byte-compiled / optimized files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Sensitive credentials & OAuth tokens (DO NOT COMMIT)
+credentials/
+*.json
+client_secret*.json
+token*.json
+.env
+.env.*
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# macOS / IDE
+.DS_Store
+.vscode/
+.idea/
