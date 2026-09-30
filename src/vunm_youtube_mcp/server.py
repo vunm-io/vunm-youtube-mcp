@@ -4,17 +4,18 @@ Exposes a comprehensive suite of tools for YouTube Channel Analytics,
 YouTube Studio Video Management, Transcript Extraction, and Comment Handling.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any
+
 from fastmcp import FastMCP
 
+from .analytics import get_channel_analytics, get_video_analytics
 from .studio import (
     get_channel_overview,
-    list_recent_videos,
-    get_video_details,
-    update_video_metadata,
     get_video_comments,
+    get_video_details,
+    list_recent_videos,
+    update_video_metadata,
 )
-from .analytics import get_channel_analytics, get_video_analytics
 from .transcript import get_video_transcript
 
 # Initialize FastMCP Server
@@ -29,9 +30,9 @@ mcp = FastMCP(
 
 
 @mcp.tool()
-def youtube_channel_stats() -> Dict[str, Any]:
+def youtube_channel_stats() -> dict[str, Any]:
     """Retrieve high-level statistics and metadata for the authenticated YouTube channel.
-    
+
     Returns subscriber count, total view count, video count, and channel profile information.
     """
     return get_channel_overview()
@@ -39,12 +40,12 @@ def youtube_channel_stats() -> Dict[str, Any]:
 
 @mcp.tool()
 def youtube_analytics_report(
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
-    dimensions: Optional[str] = "day",
-) -> Dict[str, Any]:
+    start_date: str | None = None,
+    end_date: str | None = None,
+    dimensions: str | None = "day",
+) -> dict[str, Any]:
     """Fetch performance analytics reports for the channel via YouTube Analytics API.
-    
+
     Args:
         start_date: Start date in 'YYYY-MM-DD' format (e.g. '2026-08-01'). Defaults to 30 days ago.
         end_date: End date in 'YYYY-MM-DD' format. Defaults to 2 days ago (due to YouTube API reporting lag).
@@ -60,11 +61,11 @@ def youtube_analytics_report(
 @mcp.tool()
 def youtube_video_analytics(
     video_id: str,
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
-) -> Dict[str, Any]:
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> dict[str, Any]:
     """Fetch deep performance analytics for a single video (views, watch time, retention, shares).
-    
+
     Args:
         video_id: The 11-character YouTube video ID.
         start_date: Start date in 'YYYY-MM-DD' format.
@@ -78,9 +79,9 @@ def youtube_video_analytics(
 
 
 @mcp.tool()
-def youtube_list_videos(max_results: int = 10) -> List[Dict[str, Any]]:
+def youtube_list_videos(max_results: int = 10) -> list[dict[str, Any]]:
     """List recent videos uploaded to the channel (including public, unlisted, and private videos).
-    
+
     Args:
         max_results: Number of recent videos to retrieve (between 1 and 50).
     """
@@ -88,9 +89,9 @@ def youtube_list_videos(max_results: int = 10) -> List[Dict[str, Any]]:
 
 
 @mcp.tool()
-def youtube_get_video(video_id: str) -> Dict[str, Any]:
+def youtube_get_video(video_id: str) -> dict[str, Any]:
     """Retrieve current metadata and settings for a specific video.
-    
+
     Returns title, full description, list of tags, category ID, privacy status, and view/like stats.
     """
     return get_video_details(video_id=video_id)
@@ -99,16 +100,16 @@ def youtube_get_video(video_id: str) -> Dict[str, Any]:
 @mcp.tool()
 def youtube_update_video(
     video_id: str,
-    title: Optional[str] = None,
-    description: Optional[str] = None,
-    tags: Optional[List[str]] = None,
-    category_id: Optional[str] = None,
-    privacy_status: Optional[str] = None,
-) -> Dict[str, Any]:
+    title: str | None = None,
+    description: str | None = None,
+    tags: list[str] | None = None,
+    category_id: str | None = None,
+    privacy_status: str | None = None,
+) -> dict[str, Any]:
     """Update title, description, tags, category, and/or privacy status for a video on YouTube Studio.
-    
+
     Only provide the fields you wish to modify. Unspecified fields will retain their existing values.
-    
+
     Args:
         video_id: The 11-character YouTube video ID to edit.
         title: New video title.
@@ -130,11 +131,11 @@ def youtube_update_video(
 @mcp.tool()
 def youtube_get_transcript(
     video_id_or_url: str,
-    languages: Optional[List[str]] = None,
+    languages: list[str] | None = None,
     include_timestamps: bool = True,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Extract subtitles/transcript from a YouTube video for AI summarization and content analysis.
-    
+
     Args:
         video_id_or_url: YouTube URL (e.g. 'https://www.youtube.com/watch?v=...' or 11-character ID).
         languages: Preferred language codes in order of priority (default: ['vi', 'en']).
@@ -148,9 +149,9 @@ def youtube_get_transcript(
 
 
 @mcp.tool()
-def youtube_get_comments(video_id: str, max_results: int = 20) -> List[Dict[str, Any]]:
+def youtube_get_comments(video_id: str, max_results: int = 20) -> list[dict[str, Any]]:
     """Retrieve top comments on a video for sentiment evaluation or drafting responses.
-    
+
     Args:
         video_id: The 11-character YouTube video ID.
         max_results: Maximum comments to retrieve (default: 20).

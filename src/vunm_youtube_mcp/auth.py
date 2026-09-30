@@ -4,15 +4,13 @@ Handles token persistence, automatic token refresh, and initial browser-based
 authorization for Desktop Application credentials.
 """
 
-from pathlib import Path
-from typing import Optional
 import os
-import glob
+from pathlib import Path
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
-from googleapiclient.discovery import build, Resource
+from googleapiclient.discovery import Resource, build
 
 # Scopes required for YouTube Data API v3 and YouTube Analytics API
 SCOPES = [
@@ -35,38 +33,38 @@ def get_credentials_dir() -> Path:
     return path
 
 
-def find_client_secret_file() -> Optional[Path]:
+def find_client_secret_file() -> Path | None:
     """Find the client_secret.json file in the credentials directory."""
     creds_dir = get_credentials_dir()
-    
+
     # Check exact name first
     standard_path = creds_dir / "client_secret.json"
     if standard_path.exists():
         return standard_path
-    
+
     # Look for client_secret_*.json pattern from Google Cloud Console download
     patterns = list(creds_dir.glob("client_secret*.json"))
     if patterns:
         return patterns[0]
-    
+
     return None
 
 
 def get_credentials() -> Credentials:
     """Retrieve or generate user OAuth2 credentials.
-    
+
     If credentials/token.json exists and is valid, load it.
     If expired, refresh it automatically.
     If nonexistent, trigger the local server browser authorization flow.
     """
     creds_dir = get_credentials_dir()
     token_file = creds_dir / "token.json"
-    creds: Optional[Credentials] = None
+    creds: Credentials | None = None
 
     if token_file.exists():
         try:
             creds = Credentials.from_authorized_user_file(str(token_file), SCOPES)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - v0.1 falls back to a new authorization
             print(f"[Warning] Failed to load existing token.json: {e}")
             creds = None
 
@@ -75,7 +73,7 @@ def get_credentials() -> Credentials:
             print("[Auth] Refreshing expired access token...")
             try:
                 creds.refresh(Request())
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - v0.1 falls back to a new authorization
                 print(f"[Auth] Token refresh failed ({e}), initiating re-authorization...")
                 creds = None
 
@@ -100,8 +98,8 @@ def get_credentials() -> Credentials:
     return creds
 
 
-_youtube_data_service: Optional[Resource] = None
-_youtube_analytics_service: Optional[Resource] = None
+_youtube_data_service: Resource | None = None
+_youtube_analytics_service: Resource | None = None
 
 
 def get_youtube_data_service() -> Resource:
@@ -118,5 +116,7 @@ def get_youtube_analytics_service() -> Resource:
     global _youtube_analytics_service
     if _youtube_analytics_service is None:
         creds = get_credentials()
-        _youtube_analytics_service = build("youtubeAnalytics", "v2", credentials=creds, cache_discovery=False)
+        _youtube_analytics_service = build(
+            "youtubeAnalytics", "v2", credentials=creds, cache_discovery=False
+        )
     return _youtube_analytics_service

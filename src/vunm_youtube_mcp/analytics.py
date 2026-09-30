@@ -4,18 +4,19 @@ Fetches key channel and video performance metrics such as views, watch time,
 retention, and subscriber gains/losses across specified date ranges.
 """
 
-from datetime import datetime, timedelta
-from typing import Any, Dict, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any
+
 from .auth import get_youtube_analytics_service
 
 
 def get_channel_analytics(
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
-    dimensions: Optional[str] = "day",
-) -> Dict[str, Any]:
+    start_date: str | None = None,
+    end_date: str | None = None,
+    dimensions: str | None = "day",
+) -> dict[str, Any]:
     """Query YouTube Analytics reports for the authenticated channel.
-    
+
     Args:
         start_date: Format 'YYYY-MM-DD'. Defaults to 28 days ago.
         end_date: Format 'YYYY-MM-DD'. Defaults to yesterday (YouTube analytics has a 2-day lag).
@@ -24,7 +25,7 @@ def get_channel_analytics(
     analytics = get_youtube_analytics_service()
 
     # Default to past 28 days ending 2 days ago (lag in data availability)
-    today = datetime.utcnow().date()
+    today = datetime.now(timezone.utc).date()
     if not end_date:
         end_date = (today - timedelta(days=2)).strftime("%Y-%m-%d")
     if not start_date:
@@ -35,7 +36,7 @@ def get_channel_analytics(
         "averageViewPercentage,subscribersGained,subscribersLost,likes,comments"
     )
 
-    request_kwargs: Dict[str, Any] = {
+    request_kwargs: dict[str, Any] = {
         "ids": "channel==MINE",
         "startDate": start_date,
         "endDate": end_date,
@@ -49,7 +50,7 @@ def get_channel_analytics(
 
     try:
         response = analytics.reports().query(**request_kwargs).execute()
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - v0.1 returns error dicts
         return {"error": f"Analytics query failed: {e}"}
 
     column_headers = [header.get("name") for header in response.get("columnHeaders", [])]
@@ -57,7 +58,7 @@ def get_channel_analytics(
 
     formatted_rows = []
     for row in rows:
-        formatted_rows.append(dict(zip(column_headers, row)))
+        formatted_rows.append(dict(zip(column_headers, row, strict=False)))
 
     return {
         "start_date": start_date,
@@ -70,11 +71,11 @@ def get_channel_analytics(
 
 def get_video_analytics(
     video_id: str,
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
-) -> Dict[str, Any]:
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> dict[str, Any]:
     """Query specific performance analytics for a single video.
-    
+
     Args:
         video_id: The 11-character YouTube video ID.
         start_date: Format 'YYYY-MM-DD'. Defaults to 28 days ago.
@@ -82,26 +83,27 @@ def get_video_analytics(
     """
     analytics = get_youtube_analytics_service()
 
-    today = datetime.utcnow().date()
+    today = datetime.now(timezone.utc).date()
     if not end_date:
         end_date = (today - timedelta(days=2)).strftime("%Y-%m-%d")
     if not start_date:
         start_date = (today - timedelta(days=30)).strftime("%Y-%m-%d")
 
-    metrics = (
-        "views,estimatedMinutesWatched,averageViewDuration,"
-        "averageViewPercentage,likes,shares"
-    )
+    metrics = "views,estimatedMinutesWatched,averageViewDuration,averageViewPercentage,likes,shares"
 
     try:
-        response = analytics.reports().query(
-            ids="channel==MINE",
-            filters=f"video=={video_id}",
-            startDate=start_date,
-            endDate=end_date,
-            metrics=metrics,
-        ).execute()
-    except Exception as e:
+        response = (
+            analytics.reports()
+            .query(
+                ids="channel==MINE",
+                filters=f"video=={video_id}",
+                startDate=start_date,
+                endDate=end_date,
+                metrics=metrics,
+            )
+            .execute()
+        )
+    except Exception as e:  # noqa: BLE001 - v0.1 returns error dicts
         return {"error": f"Video analytics query failed: {e}"}
 
     column_headers = [header.get("name") for header in response.get("columnHeaders", [])]
@@ -109,7 +111,7 @@ def get_video_analytics(
 
     formatted_rows = []
     for row in rows:
-        formatted_rows.append(dict(zip(column_headers, row)))
+        formatted_rows.append(dict(zip(column_headers, row, strict=False)))
 
     return {
         "video_id": video_id,

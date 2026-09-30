@@ -4,9 +4,10 @@ Extracts captions/transcripts directly without consuming YouTube Data API quota,
 supporting multiple languages and formatted timestamp outputs.
 """
 
-from typing import Any, Dict, List, Optional
 import re
-from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
+from typing import Any
+
+from youtube_transcript_api import NoTranscriptFound, TranscriptsDisabled, YouTubeTranscriptApi
 
 
 def extract_video_id(url_or_id: str) -> str:
@@ -47,11 +48,11 @@ def format_timestamp(seconds: float) -> str:
 
 def get_video_transcript(
     video_id_or_url: str,
-    languages: Optional[List[str]] = None,
+    languages: list[str] | None = None,
     include_timestamps: bool = True,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Retrieve transcript/subtitles for a YouTube video.
-    
+
     Args:
         video_id_or_url: Full YouTube URL or 11-character video ID.
         languages: List of preferred language codes, e.g. ['vi', 'en'].
@@ -67,16 +68,17 @@ def get_video_transcript(
             transcript_list = fetched.to_raw_data()
         elif hasattr(YouTubeTranscriptApi, "get_transcript"):
             transcript_list = YouTubeTranscriptApi.get_transcript(
-                video_id,
-                languages=lang_preference
+                video_id, languages=lang_preference
             )
         else:
             raise RuntimeError("Unsupported youtube-transcript-api version.")
     except TranscriptsDisabled:
         return {"error": f"Transcripts are disabled for video '{video_id}'."}
     except NoTranscriptFound:
-        return {"error": f"No transcript found in languages {lang_preference} for video '{video_id}'."}
-    except Exception as e:
+        return {
+            "error": f"No transcript found in languages {lang_preference} for video '{video_id}'."
+        }
+    except Exception as e:  # noqa: BLE001 - v0.1 returns error dicts
         return {"error": f"Failed to retrieve transcript: {e}"}
 
     formatted_lines = []

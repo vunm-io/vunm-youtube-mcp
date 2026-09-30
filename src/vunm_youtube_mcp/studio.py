@@ -4,17 +4,17 @@ Handles channel statistics, listing channel videos efficiently (using playlistIt
 to conserve quota), retrieving video details, updating metadata, and reading comments.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any
+
 from .auth import get_youtube_data_service
 
 
-def get_channel_overview() -> Dict[str, Any]:
+def get_channel_overview() -> dict[str, Any]:
     """Retrieve high-level statistics and metadata for the authenticated channel."""
     youtube = get_youtube_data_service()
-    response = youtube.channels().list(
-        mine=True,
-        part="snippet,contentDetails,statistics"
-    ).execute()
+    response = (
+        youtube.channels().list(mine=True, part="snippet,contentDetails,statistics").execute()
+    )
 
     items = response.get("items", [])
     if not items:
@@ -39,28 +39,32 @@ def get_channel_overview() -> Dict[str, Any]:
     }
 
 
-def list_recent_videos(max_results: int = 10) -> List[Dict[str, Any]]:
+def list_recent_videos(max_results: int = 10) -> list[dict[str, Any]]:
     """List recent videos uploaded to the channel (including unlisted/private).
-    
+
     Uses uploads playlist to conserve API quota (1 unit vs 100 units for search).
     """
     youtube = get_youtube_data_service()
-    
+
     # Get channel uploads playlist
     overview = get_channel_overview()
     if "error" in overview:
         return [{"error": overview["error"]}]
-    
+
     uploads_id = overview.get("uploads_playlist_id")
     if not uploads_id:
         return [{"error": "Could not locate uploads playlist ID."}]
 
     # Fetch playlist items
-    playlist_resp = youtube.playlistItems().list(
-        playlistId=uploads_id,
-        part="snippet,status,contentDetails",
-        maxResults=min(max(1, max_results), 50)
-    ).execute()
+    playlist_resp = (
+        youtube.playlistItems()
+        .list(
+            playlistId=uploads_id,
+            part="snippet,status,contentDetails",
+            maxResults=min(max(1, max_results), 50),
+        )
+        .execute()
+    )
 
     items = playlist_resp.get("items", [])
     if not items:
@@ -71,10 +75,9 @@ def list_recent_videos(max_results: int = 10) -> List[Dict[str, Any]]:
     # Fetch video statistics
     stats_map = {}
     if video_ids:
-        videos_resp = youtube.videos().list(
-            id=",".join(video_ids),
-            part="statistics,status"
-        ).execute()
+        videos_resp = (
+            youtube.videos().list(id=",".join(video_ids), part="statistics,status").execute()
+        )
         for v in videos_resp.get("items", []):
             stats_map[v["id"]] = {
                 "statistics": v.get("statistics", {}),
@@ -88,27 +91,32 @@ def list_recent_videos(max_results: int = 10) -> List[Dict[str, Any]]:
         v_info = stats_map.get(vid, {})
         v_stats = v_info.get("statistics", {})
 
-        results.append({
-            "video_id": vid,
-            "title": snippet.get("title"),
-            "published_at": snippet.get("publishedAt"),
-            "privacy_status": v_info.get("privacy_status", item.get("status", {}).get("privacyStatus")),
-            "view_count": v_stats.get("viewCount", "0"),
-            "like_count": v_stats.get("likeCount", "0"),
-            "comment_count": v_stats.get("commentCount", "0"),
-            "thumbnails": snippet.get("thumbnails", {}),
-        })
+        results.append(
+            {
+                "video_id": vid,
+                "title": snippet.get("title"),
+                "published_at": snippet.get("publishedAt"),
+                "privacy_status": v_info.get(
+                    "privacy_status", item.get("status", {}).get("privacyStatus")
+                ),
+                "view_count": v_stats.get("viewCount", "0"),
+                "like_count": v_stats.get("likeCount", "0"),
+                "comment_count": v_stats.get("commentCount", "0"),
+                "thumbnails": snippet.get("thumbnails", {}),
+            }
+        )
 
     return results
 
 
-def get_video_details(video_id: str) -> Dict[str, Any]:
+def get_video_details(video_id: str) -> dict[str, Any]:
     """Retrieve full details, snippet, tags, category, and statistics for a specific video."""
     youtube = get_youtube_data_service()
-    response = youtube.videos().list(
-        id=video_id,
-        part="snippet,status,statistics,contentDetails"
-    ).execute()
+    response = (
+        youtube.videos()
+        .list(id=video_id, part="snippet,status,statistics,contentDetails")
+        .execute()
+    )
 
     items = response.get("items", [])
     if not items:
@@ -138,24 +146,21 @@ def get_video_details(video_id: str) -> Dict[str, Any]:
 
 def update_video_metadata(
     video_id: str,
-    title: Optional[str] = None,
-    description: Optional[str] = None,
-    tags: Optional[List[str]] = None,
-    category_id: Optional[str] = None,
-    privacy_status: Optional[str] = None,
-) -> Dict[str, Any]:
+    title: str | None = None,
+    description: str | None = None,
+    tags: list[str] | None = None,
+    category_id: str | None = None,
+    privacy_status: str | None = None,
+) -> dict[str, Any]:
     """Update title, description, tags, category, and/or privacy status of a video.
-    
+
     Fetches existing snippet first to preserve unmodified fields and satisfy
     mandatory YouTube API parameters.
     """
     youtube = get_youtube_data_service()
 
     # Step 1: Fetch existing data
-    get_resp = youtube.videos().list(
-        id=video_id,
-        part="snippet,status"
-    ).execute()
+    get_resp = youtube.videos().list(id=video_id, part="snippet,status").execute()
 
     items = get_resp.get("items", [])
     if not items:
@@ -179,7 +184,9 @@ def update_video_metadata(
         if privacy_status.lower() in valid_statuses:
             status["privacyStatus"] = privacy_status.lower()
         else:
-            return {"error": f"Invalid privacy_status '{privacy_status}'. Must be one of {valid_statuses}."}
+            return {
+                "error": f"Invalid privacy_status '{privacy_status}'. Must be one of {valid_statuses}."
+            }
 
     # Step 3: Execute update
     update_body = {
@@ -188,10 +195,7 @@ def update_video_metadata(
         "status": status,
     }
 
-    update_resp = youtube.videos().update(
-        part="snippet,status",
-        body=update_body
-    ).execute()
+    update_resp = youtube.videos().update(part="snippet,status", body=update_body).execute()
 
     updated_snippet = update_resp.get("snippet", {})
     updated_status = update_resp.get("status", {})
@@ -207,29 +211,35 @@ def update_video_metadata(
     }
 
 
-def get_video_comments(video_id: str, max_results: int = 20) -> List[Dict[str, Any]]:
+def get_video_comments(video_id: str, max_results: int = 20) -> list[dict[str, Any]]:
     """Retrieve top recent comments for a video."""
     youtube = get_youtube_data_service()
     try:
-        response = youtube.commentThreads().list(
-            videoId=video_id,
-            part="snippet",
-            maxResults=min(max(1, max_results), 100),
-            order="relevance"
-        ).execute()
-    except Exception as e:
+        response = (
+            youtube.commentThreads()
+            .list(
+                videoId=video_id,
+                part="snippet",
+                maxResults=min(max(1, max_results), 100),
+                order="relevance",
+            )
+            .execute()
+        )
+    except Exception as e:  # noqa: BLE001 - v0.1 returns error dicts
         return [{"error": f"Failed to fetch comments: {e}"}]
 
     comments = []
     for item in response.get("items", []):
         top_comment = item.get("snippet", {}).get("topLevelComment", {}).get("snippet", {})
-        comments.append({
-            "comment_id": item.get("id"),
-            "author": top_comment.get("authorDisplayName"),
-            "text": top_comment.get("textDisplay"),
-            "like_count": top_comment.get("likeCount", 0),
-            "published_at": top_comment.get("publishedAt"),
-            "total_reply_count": item.get("snippet", {}).get("totalReplyCount", 0),
-        })
+        comments.append(
+            {
+                "comment_id": item.get("id"),
+                "author": top_comment.get("authorDisplayName"),
+                "text": top_comment.get("textDisplay"),
+                "like_count": top_comment.get("likeCount", 0),
+                "published_at": top_comment.get("publishedAt"),
+                "total_reply_count": item.get("snippet", {}).get("totalReplyCount", 0),
+            }
+        )
 
     return comments
