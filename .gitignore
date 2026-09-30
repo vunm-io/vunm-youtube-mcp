@@ -11,16 +11,18 @@ env/
 
 # Sensitive credentials & OAuth tokens (DO NOT COMMIT)
 credentials/
-*.json
 client_secret*.json
 token*.json
-.env
-.env.*
+.env*
 
 # Distribution / packaging
 dist/
 build/
 *.egg-info/
+
+# Tool caches
+.pytest_cache/
+.ruff_cache/
 
 # macOS / IDE
 .DS_Store

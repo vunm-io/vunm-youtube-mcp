@@ -20,8 +20,8 @@ SCOPES = [
     "https://www.googleapis.com/auth/yt-analytics.readonly",
 ]
 
-# Base directory for storing credentials
-DEFAULT_CREDENTIALS_DIR = Path(__file__).resolve().parent.parent / "credentials"
+# Base directory for storing credentials (the repository root when run from source)
+DEFAULT_CREDENTIALS_DIR = Path(__file__).resolve().parents[2] / "credentials"
 
 
 def get_credentials_dir() -> Path:
