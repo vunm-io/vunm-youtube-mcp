@@ -1,126 +1,205 @@
-"""Authentication module for YouTube APIs using OAuth 2.0.
+"""OAuth 2.0 credentials for the YouTube Data and Analytics APIs.
 
-Handles token persistence, automatic token refresh, and initial browser-based
-authorization for Desktop Application credentials.
+Tools only *load* credentials: `load_credentials` reads the saved token,
+refreshes it when it has expired and raises `AuthRequired` when that is not
+possible. Only the interactive `vunm-youtube-mcp auth` command runs the
+browser flow (`run_auth_flow`), so a tool call never blocks on a browser.
 """
+
+from __future__ import annotations
 
 import logging
 import os
+import tempfile
+from contextlib import suppress
 from pathlib import Path
 
+from fastmcp.exceptions import ToolError
+from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import Resource, build
 
+from vunm_youtube_mcp.config import Mode, Settings
+
 logger = logging.getLogger(__name__)
 
-# Scopes required for YouTube Data API v3 and YouTube Analytics API
-SCOPES = [
-    "https://www.googleapis.com/auth/youtube",
-    "https://www.googleapis.com/auth/yt-analytics.readonly",
-]
+SCOPE_PREFIX = "https://www.googleapis.com/auth/"
+YOUTUBE = SCOPE_PREFIX + "youtube"
+YOUTUBE_READONLY = SCOPE_PREFIX + "youtube.readonly"
+YT_ANALYTICS_READONLY = SCOPE_PREFIX + "yt-analytics.readonly"
 
-# Base directory for storing credentials (the repository root when run from source)
-DEFAULT_CREDENTIALS_DIR = Path(__file__).resolve().parents[2] / "credentials"
+SCOPES: dict[Mode, tuple[str, ...]] = {
+    Mode.FULL: (YOUTUBE, YT_ANALYTICS_READONLY),
+    Mode.READ_ONLY: (YOUTUBE_READONLY, YT_ANALYTICS_READONLY),
+}
 
-
-def get_credentials_dir() -> Path:
-    """Return the credentials directory path."""
-    custom_dir = os.environ.get("YOUTUBE_CREDENTIALS_DIR")
-    if custom_dir:
-        path = Path(custom_dir)
-    else:
-        path = DEFAULT_CREDENTIALS_DIR
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+TESTING_EXPIRY_NOTE = (
+    "If the OAuth consent screen of your Google Cloud project is in Testing status, "
+    "Google expires its refresh tokens after 7 days; publishing the app to "
+    "In production avoids that."
+)
 
 
-def find_client_secret_file() -> Path | None:
-    """Find the client_secret.json file in the credentials directory."""
-    creds_dir = get_credentials_dir()
-
-    # Check exact name first
-    standard_path = creds_dir / "client_secret.json"
-    if standard_path.exists():
-        return standard_path
-
-    # Look for client_secret_*.json pattern from Google Cloud Console download
-    patterns = list(creds_dir.glob("client_secret*.json"))
-    if patterns:
-        return patterns[0]
-
-    return None
+def scopes_for(mode: Mode) -> tuple[str, ...]:
+    """The OAuth scopes a mode needs. `public` mode uses an API key instead."""
+    try:
+        return SCOPES[mode]
+    except KeyError:
+        raise ValueError(f"{mode} mode does not use OAuth") from None
 
 
-def get_credentials() -> Credentials:
-    """Retrieve or generate user OAuth2 credentials.
+def auth_command(mode: Mode) -> str:
+    """The command that authorizes `mode`."""
+    if mode is Mode.FULL:
+        return "vunm-youtube-mcp auth"
+    return f"vunm-youtube-mcp auth --mode {mode}"
 
-    If credentials/token.json exists and is valid, load it.
-    If expired, refresh it automatically.
-    If nonexistent, trigger the local server browser authorization flow.
+
+def _short(scopes) -> str:
+    return ", ".join(sorted(scope.removeprefix(SCOPE_PREFIX) for scope in scopes)) or "none"
+
+
+class AuthRequired(ToolError):
+    """There is no usable token; the user has to run `vunm-youtube-mcp auth`."""
+
+    def __init__(self, reason: str, mode: Mode) -> None:
+        self.reason = reason
+        self.mode = mode
+        super().__init__(
+            f"YouTube authorization needed: {reason}. Run `{auth_command(mode)}` in a "
+            f"terminal, then retry. {TESTING_EXPIRY_NOTE}"
+        )
+
+
+def load_credentials(settings: Settings) -> Credentials:
+    """Load the saved token for `settings.mode`, refreshing it when it has expired.
+
+    Never opens a browser. Raises `AuthRequired` when the token is missing or
+    unreadable, was granted other scopes than the mode needs, or cannot be
+    refreshed.
     """
-    creds_dir = get_credentials_dir()
-    token_file = creds_dir / "token.json"
-    creds: Credentials | None = None
+    mode = settings.mode
+    required = scopes_for(mode)
+    token_file = settings.token_file
+    if not token_file.is_file():
+        raise AuthRequired(f"no saved token at {token_file}", mode)
 
-    if token_file.exists():
-        try:
-            creds = Credentials.from_authorized_user_file(str(token_file), SCOPES)
-        except Exception as e:  # noqa: BLE001 - v0.1 falls back to a new authorization
-            logger.warning("Could not load %s: %s", token_file, e)
-            creds = None
+    try:
+        creds = Credentials.from_authorized_user_file(str(token_file))
+    except (OSError, ValueError) as exc:
+        raise AuthRequired(f"the token at {token_file} cannot be read ({exc})", mode) from exc
 
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            logger.info("Refreshing the expired access token")
-            try:
-                creds.refresh(Request())
-            except Exception as e:  # noqa: BLE001 - v0.1 falls back to a new authorization
-                logger.warning("Token refresh failed (%s); starting a new authorization", e)
-                creds = None
+    granted = set(creds.scopes or ())
+    if granted != set(required):
+        raise AuthRequired(
+            f"the saved token grants [{_short(granted)}] but {mode} mode needs "
+            f"[{_short(required)}]",
+            mode,
+        )
 
-        if not creds:
-            secret_file = find_client_secret_file()
-            if not secret_file:
-                raise FileNotFoundError(
-                    f"No client secret found in {creds_dir}.\n"
-                    "Please download OAuth 2.0 Client ID (Desktop app) from Google Cloud Console "
-                    f"and save it as '{creds_dir / 'client_secret.json'}'."
-                )
+    if creds.valid:
+        return creds
+    if not creds.refresh_token:
+        raise AuthRequired("the saved token has expired and has no refresh token", mode)
 
-            logger.warning("Opening a browser to authorize with %s", secret_file.name)
-            flow = InstalledAppFlow.from_client_secrets_file(str(secret_file), SCOPES)
-            # No prompt message: run_local_server prints it to stdout, which would
-            # corrupt the stdio transport when this runs inside a tool call.
-            creds = flow.run_local_server(port=0, authorization_prompt_message=None)
-
-        # Save credentials for future runs
-        with open(token_file, "w", encoding="utf-8") as token_out:
-            token_out.write(creds.to_json())
-        logger.info("Saved credentials to %s", token_file)
-
+    logger.info("Refreshing the expired access token")
+    try:
+        creds.refresh(Request())
+    except RefreshError as exc:
+        detail = exc.args[0] if exc.args else exc
+        raise AuthRequired(f"Google refused to refresh the saved token ({detail})", mode) from exc
+    save_token(creds, token_file)
     return creds
 
 
+def ensure_private_dir(directory: Path) -> None:
+    """Create `directory` readable by its owner only (0700) if it does not exist."""
+    if directory.is_dir():
+        return
+    directory.mkdir(parents=True, exist_ok=True)
+    os.chmod(directory, 0o700)
+
+
+def save_token(creds: Credentials, token_file: Path) -> None:
+    """Write the token atomically, readable by its owner only (0600)."""
+    directory = token_file.parent
+    ensure_private_dir(directory)
+    fd, tmp_name = tempfile.mkstemp(prefix=".token-", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(creds.to_json())
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp_name, 0o600)
+        os.replace(tmp_name, token_file)
+    except BaseException:
+        with suppress(OSError):
+            os.unlink(tmp_name)
+        raise
+    logger.info("Saved the token to %s", token_file)
+
+
+def find_client_secret(directory: Path) -> Path | None:
+    """`client_secret.json`, or the `client_secret_*.json` name Google downloads."""
+    exact = directory / "client_secret.json"
+    if exact.is_file():
+        return exact
+    matches = sorted(path for path in directory.glob("client_secret*.json") if path.is_file())
+    return matches[0] if matches else None
+
+
+def run_auth_flow(settings: Settings, client_secret: Path) -> Credentials:
+    """Authorize in the browser and save the token. Interactive: for the CLI only."""
+    flow = InstalledAppFlow.from_client_secrets_file(
+        str(client_secret), scopes=list(scopes_for(settings.mode))
+    )
+    # prompt=consent makes Google return a refresh token on every authorization.
+    creds = flow.run_local_server(port=0, prompt="consent")
+    save_token(creds, settings.token_file)
+    return creds
+
+
+def legacy_credentials_dirs() -> list[Path]:
+    """Where v0.1 kept credentials: `credentials/` in the checkout (or the current dir)."""
+    source_checkout = Path(__file__).resolve().parents[2] / "credentials"
+    return list(dict.fromkeys([Path.cwd() / "credentials", source_checkout]))
+
+
+def find_legacy_credentials(settings: Settings) -> Path | None:
+    """A v0.1 credentials directory with files in it, while the new one has none."""
+    if find_client_secret(settings.credentials_dir) or settings.token_file.exists():
+        return None
+    for candidate in legacy_credentials_dirs():
+        if candidate.resolve() == settings.credentials_dir.resolve():
+            continue
+        has_files = find_client_secret(candidate) or (candidate / "token.json").is_file()
+        if candidate.is_dir() and has_files:
+            return candidate
+    return None
+
+
+# Service clients, built on first use. Settings come from the environment,
+# which `serve` validated at startup.
 _youtube_data_service: Resource | None = None
 _youtube_analytics_service: Resource | None = None
 
 
 def get_youtube_data_service() -> Resource:
-    """Return an authenticated YouTube Data API v3 service client."""
+    """An authenticated YouTube Data API v3 client."""
     global _youtube_data_service
     if _youtube_data_service is None:
-        creds = get_credentials()
+        creds = load_credentials(Settings.from_env())
         _youtube_data_service = build("youtube", "v3", credentials=creds, cache_discovery=False)
     return _youtube_data_service
 
 
 def get_youtube_analytics_service() -> Resource:
-    """Return an authenticated YouTube Analytics API v2 service client."""
+    """An authenticated YouTube Analytics API v2 client."""
     global _youtube_analytics_service
     if _youtube_analytics_service is None:
-        creds = get_credentials()
+        creds = load_credentials(Settings.from_env())
         _youtube_analytics_service = build(
             "youtubeAnalytics", "v2", credentials=creds, cache_discovery=False
         )

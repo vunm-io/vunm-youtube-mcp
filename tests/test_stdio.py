@@ -129,4 +129,5 @@ async def test_every_stdout_line_is_a_jsonrpc_message(tmp_path):
     listed_names = {tool["name"] for tool in listed["result"]["tools"]}
     assert listed_names == await _expected_tool_names()
     assert called["result"]["isError"] is True
+    assert "Run `vunm-youtube-mcp auth`" in called["result"]["content"][0]["text"]
     assert process.returncode == 0

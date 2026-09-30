@@ -1,23 +1,23 @@
 """Command-line entry point: ``vunm-youtube-mcp [serve|auth]``.
 
-``serve`` (the default) runs the MCP server over stdio. ``auth`` is the
-interactive, one-time OAuth setup; it is the only command that may open a
-browser or print to stdout.
+``serve`` (the default) runs the MCP server over stdio and never writes to
+stdout itself. ``auth`` is the interactive OAuth setup; it is the only command
+that opens a browser or prints to stdout.
 """
 
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import logging
-import os
 import sys
 from collections.abc import Sequence
 
 from vunm_youtube_mcp import __version__
+from vunm_youtube_mcp.config import ConfigError, Mode, Settings
 
-LOG_LEVEL_ENV = "YOUTUBE_MCP_LOG_LEVEL"
-_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 _LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+_README = "https://github.com/vunm-io/vunm-youtube-mcp#readme"
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -28,25 +28,29 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     commands = parser.add_subparsers(dest="command", metavar="{serve,auth}")
     commands.add_parser("serve", help="run the MCP server over stdio (default)")
-    commands.add_parser("auth", help="authorize access to your YouTube channel in a browser")
+    auth = commands.add_parser("auth", help="authorize access to your YouTube channel")
+    auth.add_argument(
+        "--mode",
+        choices=[Mode.FULL.value, Mode.READ_ONLY.value],
+        help="access to authorize (default: YOUTUBE_MCP_MODE, else full)",
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the CLI and return a process exit code."""
     args = _build_parser().parse_args(argv)
-    level = os.environ.get(LOG_LEVEL_ENV, "").strip().upper() or "WARNING"
-    if level not in _LOG_LEVELS:
-        print(
-            f"vunm-youtube-mcp: invalid {LOG_LEVEL_ENV}={level!r}; "
-            f"expected one of {', '.join(_LOG_LEVELS)}",
-            file=sys.stderr,
-        )
+    try:
+        settings = Settings.from_env()
+    except ConfigError as exc:
+        print(f"vunm-youtube-mcp: {exc}", file=sys.stderr)
         return 2
-    configure_logging(level)
+    configure_logging(settings.log_level)
     if args.command == "auth":
-        return _auth()
-    return _serve(level)
+        if args.mode:
+            settings = dataclasses.replace(settings, mode=Mode(args.mode))
+        return _auth(settings)
+    return _serve(settings)
 
 
 def configure_logging(level: str) -> None:
@@ -58,41 +62,79 @@ def configure_logging(level: str) -> None:
     logging.captureWarnings(True)
 
 
-def _serve(level: str) -> int:
+def _serve(settings: Settings) -> int:
     from vunm_youtube_mcp.server import mcp
 
-    mcp.run(transport="stdio", show_banner=False, log_level=level)
+    mcp.run(transport="stdio", show_banner=False, log_level=settings.log_level)
     return 0
 
 
-def _auth() -> int:
-    from vunm_youtube_mcp.auth import find_client_secret_file, get_credentials, get_credentials_dir
-    from vunm_youtube_mcp.studio import get_channel_overview
+def _auth(settings: Settings) -> int:
+    from vunm_youtube_mcp import auth
 
-    print("vunm-youtube-mcp: OAuth 2.0 setup")
-    creds_dir = get_credentials_dir()
-    secret_file = find_client_secret_file()
-    if not secret_file:
-        print(f"\nNo client secret file found in {creds_dir}.")
-        print("1. Open Google Cloud Console (https://console.cloud.google.com/).")
-        print("2. Create or select a project, then enable YouTube Data API v3 and")
-        print("   YouTube Analytics API.")
-        print("3. Configure the OAuth consent screen.")
-        print("4. Credentials -> Create credentials -> OAuth client ID (type: Desktop app).")
-        print(f"5. Download the JSON file and save it as {creds_dir / 'client_secret.json'}")
+    if settings.mode is Mode.PUBLIC:
+        print(
+            "public mode reads public data with YOUTUBE_API_KEY and needs no authorization.",
+            file=sys.stderr,
+        )
+        return 2
+
+    creds_dir = settings.credentials_dir
+    auth.ensure_private_dir(creds_dir)
+    client_secret = auth.find_client_secret(creds_dir)
+    if client_secret is None:
+        legacy = auth.find_legacy_credentials(settings)
+        if legacy is not None:
+            _print_legacy_hint(legacy, settings)
+        else:
+            _print_setup_steps(settings)
         return 1
 
-    print(f"Found client secret: {secret_file.name}. Opening the browser to authorize...")
+    print(f"Authorizing {settings.mode} access with {client_secret.name}.")
+    print("Your browser opens Google's consent page; pick the account that owns the channel.")
     try:
-        get_credentials()
-        print(f"Authorization succeeded. Token saved to {creds_dir / 'token.json'}")
-        overview = get_channel_overview()
+        creds = auth.run_auth_flow(settings, client_secret)
     except Exception as exc:  # noqa: BLE001 - report any failure of the interactive flow
-        print(f"Authorization failed: {exc}")
+        print(f"Authorization failed: {exc}", file=sys.stderr)
         return 1
+    print(f"Token written to {settings.token_file}")
 
-    if "error" in overview:
-        print(f"Warning: the API returned an error: {overview['error']}")
-    else:
-        print(f"Connected to channel: {overview.get('title')}")
+    title = _channel_title(creds)
+    if title:
+        print(f"Authorized channel: {title}")
     return 0
+
+
+def _print_legacy_hint(legacy, settings: Settings) -> None:
+    new = settings.credentials_dir
+    print(f"Found v0.1 credentials in {legacy}.")
+    print(f"This version reads them from {new}. Move them there yourself, for example:")
+    print(f'  mv "{legacy}"/* "{new}"/ && chmod 600 "{new}"/*')
+    print("then run `vunm-youtube-mcp auth` again.")
+
+
+def _print_setup_steps(settings: Settings) -> None:
+    creds_dir = settings.credentials_dir
+    print(f"No OAuth client secret in {creds_dir}.")
+    print("1. In Google Cloud Console, enable YouTube Data API v3 and YouTube Analytics API.")
+    print("2. Configure the OAuth consent screen. In Testing status Google expires refresh")
+    print("   tokens after 7 days; publish the app (In production) to avoid that.")
+    print('3. Create an OAuth client ID of type "Desktop app" and download its JSON.')
+    print(f"4. Save it as {creds_dir / 'client_secret.json'} and run this command again.")
+    print(f"Details: {_README}")
+
+
+def _channel_title(creds) -> str | None:
+    """The authorized channel's title, to confirm the account; None if unavailable."""
+    from googleapiclient.discovery import build
+
+    try:
+        youtube = build("youtube", "v3", credentials=creds, cache_discovery=False)
+        items = youtube.channels().list(mine=True, part="snippet").execute().get("items", [])
+    except Exception as exc:  # noqa: BLE001 - the token is saved; this is only a check
+        print(f"Warning: could not read the channel to confirm the account: {exc}")
+        return None
+    if not items:
+        print("Warning: this Google account has no YouTube channel.")
+        return None
+    return items[0].get("snippet", {}).get("title")
