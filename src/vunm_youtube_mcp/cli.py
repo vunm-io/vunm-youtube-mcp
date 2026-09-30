@@ -8,9 +8,16 @@ browser or print to stdout.
 from __future__ import annotations
 
 import argparse
+import logging
+import os
+import sys
 from collections.abc import Sequence
 
 from vunm_youtube_mcp import __version__
+
+LOG_LEVEL_ENV = "YOUTUBE_MCP_LOG_LEVEL"
+_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+_LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -28,15 +35,33 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the CLI and return a process exit code."""
     args = _build_parser().parse_args(argv)
+    level = os.environ.get(LOG_LEVEL_ENV, "").strip().upper() or "WARNING"
+    if level not in _LOG_LEVELS:
+        print(
+            f"vunm-youtube-mcp: invalid {LOG_LEVEL_ENV}={level!r}; "
+            f"expected one of {', '.join(_LOG_LEVELS)}",
+            file=sys.stderr,
+        )
+        return 2
+    configure_logging(level)
     if args.command == "auth":
         return _auth()
-    return _serve()
+    return _serve(level)
 
 
-def _serve() -> int:
+def configure_logging(level: str) -> None:
+    """Send every log record, and Python warnings, to stderr.
+
+    Over the stdio transport, stdout carries MCP messages only.
+    """
+    logging.basicConfig(stream=sys.stderr, level=level, format=_LOG_FORMAT, force=True)
+    logging.captureWarnings(True)
+
+
+def _serve(level: str) -> int:
     from vunm_youtube_mcp.server import mcp
 
-    mcp.run(show_banner=False)
+    mcp.run(transport="stdio", show_banner=False, log_level=level)
     return 0
 
 

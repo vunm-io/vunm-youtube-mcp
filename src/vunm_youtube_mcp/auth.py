@@ -4,6 +4,7 @@ Handles token persistence, automatic token refresh, and initial browser-based
 authorization for Desktop Application credentials.
 """
 
+import logging
 import os
 from pathlib import Path
 
@@ -11,6 +12,8 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import Resource, build
+
+logger = logging.getLogger(__name__)
 
 # Scopes required for YouTube Data API v3 and YouTube Analytics API
 SCOPES = [
@@ -65,16 +68,16 @@ def get_credentials() -> Credentials:
         try:
             creds = Credentials.from_authorized_user_file(str(token_file), SCOPES)
         except Exception as e:  # noqa: BLE001 - v0.1 falls back to a new authorization
-            print(f"[Warning] Failed to load existing token.json: {e}")
+            logger.warning("Could not load %s: %s", token_file, e)
             creds = None
 
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
-            print("[Auth] Refreshing expired access token...")
+            logger.info("Refreshing the expired access token")
             try:
                 creds.refresh(Request())
             except Exception as e:  # noqa: BLE001 - v0.1 falls back to a new authorization
-                print(f"[Auth] Token refresh failed ({e}), initiating re-authorization...")
+                logger.warning("Token refresh failed (%s); starting a new authorization", e)
                 creds = None
 
         if not creds:
@@ -86,14 +89,16 @@ def get_credentials() -> Credentials:
                     f"and save it as '{creds_dir / 'client_secret.json'}'."
                 )
 
-            print(f"[Auth] Starting OAuth2 authorization flow using {secret_file.name}...")
+            logger.warning("Opening a browser to authorize with %s", secret_file.name)
             flow = InstalledAppFlow.from_client_secrets_file(str(secret_file), SCOPES)
-            creds = flow.run_local_server(port=0)
+            # No prompt message: run_local_server prints it to stdout, which would
+            # corrupt the stdio transport when this runs inside a tool call.
+            creds = flow.run_local_server(port=0, authorization_prompt_message=None)
 
         # Save credentials for future runs
         with open(token_file, "w", encoding="utf-8") as token_out:
             token_out.write(creds.to_json())
-        print(f"[Auth] Credentials saved to {token_file}")
+        logger.info("Saved credentials to %s", token_file)
 
     return creds
 
