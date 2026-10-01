@@ -15,7 +15,7 @@ from mcp.types import ToolAnnotations
 from pydantic import Field
 
 from vunm_youtube_mcp import __version__, analytics, studio, transcript
-from vunm_youtube_mcp.config import Settings
+from vunm_youtube_mcp.config import Mode, Settings
 from vunm_youtube_mcp.errors import google_api_errors
 from vunm_youtube_mcp.services import GoogleServiceProvider, ServiceProvider
 
@@ -30,13 +30,36 @@ ReportDate = Annotated[
 ]
 Dimension = Literal["day", "month", "country"]
 
-READ = ToolAnnotations(read_only_hint=True, open_world_hint=True)
+CategoryId = Annotated[
+    str | None,
+    Field(pattern=r"^[0-9]+$", description="Numeric video category ID, e.g. 27 (Education)."),
+]
 
-INSTRUCTIONS = (
-    "Tools for the YouTube channel authorized on this machine: channel statistics, "
-    "analytics reports, uploads, video metadata, comments and transcripts. "
-    "If a tool reports that authorization is needed, ask the user to run the "
-    "command it names in a terminal; do not retry until they have."
+READ = ToolAnnotations(read_only_hint=True, open_world_hint=True)
+WRITE = ToolAnnotations(
+    read_only_hint=False, destructive_hint=True, idempotent_hint=True, open_world_hint=True
+)
+
+INSTRUCTIONS = {
+    Mode.FULL: (
+        "Tools for the YouTube channel authorized on this machine: channel statistics, "
+        "analytics reports, uploads, video metadata, comments and transcripts. "
+        "youtube_update_video previews by default: show the user the changes and "
+        "warnings, and call it with dry_run=false only after they confirm. "
+    ),
+    Mode.READ_ONLY: (
+        "Read-only tools for the YouTube channel authorized on this machine: channel "
+        "statistics, analytics reports, uploads, video metadata, comments and "
+        "transcripts. This server cannot change the channel. "
+    ),
+    Mode.PUBLIC: (
+        "Tools for public YouTube data, read with an API key: video details, comments, "
+        "transcripts and search. There is no access to a channel's private data. "
+    ),
+}
+AUTH_INSTRUCTION = (
+    "If a tool reports that authorization is needed, ask the user to run the command "
+    "it names in a terminal; do not retry until they have."
 )
 
 
@@ -44,7 +67,11 @@ def build_server(settings: Settings, provider: ServiceProvider | None = None) ->
     """A server for `settings`, reaching Google through `provider`."""
     provider = provider or GoogleServiceProvider(settings)
     mode = settings.mode
-    server = FastMCP(name="vunm-youtube-mcp", instructions=INSTRUCTIONS, version=__version__)
+    server = FastMCP(
+        name="vunm-youtube-mcp",
+        instructions=INSTRUCTIONS[mode] + AUTH_INSTRUCTION,
+        version=__version__,
+    )
     uploads_cache: dict[str, str] = {}
 
     def uploads_playlist() -> str:
@@ -113,23 +140,6 @@ def build_server(settings: Settings, provider: ServiceProvider | None = None) ->
         with google_api_errors(mode):
             return studio.video_details(provider.data(), video_id)
 
-    @server.tool(title="Update video metadata")
-    def youtube_update_video(
-        video_id: VideoId,
-        title: str | None = None,
-        description: str | None = None,
-        tags: list[str] | None = None,
-        category_id: str | None = None,
-        privacy_status: Literal["public", "unlisted", "private"] | None = None,
-    ) -> dict[str, Any]:
-        """Change the title, description, tags, category or privacy status of a video.
-        Fields left out keep their current values; tags replace the whole list.
-        Quota: 51 units."""
-        with google_api_errors(mode):
-            return studio.update_video_metadata(
-                provider.data(), video_id, title, description, tags, category_id, privacy_status
-            )
-
     @server.tool(title="Video transcript", annotations=READ)
     def youtube_get_transcript(
         video_id_or_url: Annotated[
@@ -156,6 +166,50 @@ def build_server(settings: Settings, provider: ServiceProvider | None = None) ->
         and reply counts. Quota: 1 unit."""
         with google_api_errors(mode):
             return studio.video_comments(provider.data(), video_id, max_results)
+
+    if mode is Mode.FULL:
+
+        @server.tool(title="Update video metadata", annotations=WRITE)
+        def youtube_update_video(
+            video_id: VideoId,
+            title: Annotated[
+                str | None, Field(description="New title: up to 100 characters, no < or >.")
+            ] = None,
+            description: Annotated[
+                str | None,
+                Field(description="New description: up to 5000 bytes (UTF-8), no < or >."),
+            ] = None,
+            tags: Annotated[
+                list[str] | None,
+                Field(
+                    description="Replaces every tag. Up to 500 characters in total, where "
+                    "commas count and a tag with a space counts as quoted."
+                ),
+            ] = None,
+            category_id: CategoryId = None,
+            privacy_status: Literal["public", "unlisted", "private"] | None = None,
+            dry_run: Annotated[
+                bool, Field(description="Preview only (the default); false writes the change.")
+            ] = True,
+        ) -> dict[str, Any]:
+            """Preview or apply a change to a video's title, description, tags,
+            category or privacy status. Fields left out keep their values.
+
+            With dry_run=true (the default) nothing is written: the result lists
+            `changes` (before and after), `warnings` (for example, the video becoming
+            public or tags being dropped) and `quota_cost`, the 50 units the write would
+            cost. Show these to the user and call again with dry_run=false only after
+            they confirm. Returns {changed: false} when nothing would change. A preview
+            costs 1 quota unit; applying costs 51."""
+            requested = {
+                "title": title,
+                "description": description,
+                "tags": tags,
+                "category_id": category_id,
+                "privacy_status": privacy_status,
+            }
+            with google_api_errors(mode):
+                return studio.update_video(provider.data(), video_id, requested, dry_run=dry_run)
 
     return server
 

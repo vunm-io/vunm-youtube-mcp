@@ -4,7 +4,7 @@ import pytest
 from fastmcp import Client
 
 from vunm_youtube_mcp import server as server_module
-from vunm_youtube_mcp.config import Settings
+from vunm_youtube_mcp.config import Mode, Settings
 from vunm_youtube_mcp.server import VIDEO_ID_PATTERN, build_server
 
 READ_TOOLS = {
@@ -24,8 +24,29 @@ async def _tools(server):
         return {tool.name: tool for tool in await client.list_tools()}
 
 
-async def test_lists_the_tools(make_server):
-    assert set(await _tools(make_server())) == READ_TOOLS | WRITE_TOOLS
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [(Mode.FULL, READ_TOOLS | WRITE_TOOLS), (Mode.READ_ONLY, READ_TOOLS)],
+)
+async def test_lists_the_tools_of_each_mode(make_server, mode, expected):
+    assert set(await _tools(make_server(mode))) == expected
+
+
+async def test_the_write_tool_is_annotated_destructive_and_idempotent(make_server):
+    annotations = (await _tools(make_server()))["youtube_update_video"].annotations
+
+    assert annotations.read_only_hint is False
+    assert annotations.destructive_hint is True
+    assert annotations.idempotent_hint is True
+
+
+def test_instructions_follow_the_mode(make_server):
+    full = make_server(Mode.FULL).instructions
+    read_only = make_server(Mode.READ_ONLY).instructions
+
+    assert "dry_run=false only after they confirm" in full
+    assert "cannot change the channel" in read_only
+    assert all("authorization is needed" in text for text in (full, read_only))
 
 
 async def test_read_tools_are_annotated_read_only_with_titles(make_server):

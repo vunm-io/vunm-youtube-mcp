@@ -130,44 +130,152 @@ def video_details(youtube: Any, video_id: str) -> dict[str, Any]:
     }
 
 
-def update_video_metadata(
+# Limits from the videos resource reference (developers.google.com/youtube/v3/docs/videos).
+TITLE_MAX_CHARS = 100
+DESCRIPTION_MAX_BYTES = 5000
+TAGS_MAX_CHARS = 500
+UPDATE_QUOTA_COST = 50
+
+# Mutable properties of the parts videos.update writes. The API resets every
+# mutable property of a part it writes that the body leaves out, so the body
+# carries all of them, and only parts that change are written.
+SNIPPET_WRITABLE = (
+    "title",
+    "description",
+    "tags",
+    "categoryId",
+    "defaultLanguage",
+    "defaultAudioLanguage",
+)
+STATUS_WRITABLE = (
+    "privacyStatus",
+    "publishAt",
+    "license",
+    "embeddable",
+    "publicStatsViewable",
+    "selfDeclaredMadeForKids",
+    "containsSyntheticMedia",
+)
+# Tool argument -> (part, property).
+UPDATABLE = {
+    "title": ("snippet", "title"),
+    "description": ("snippet", "description"),
+    "tags": ("snippet", "tags"),
+    "category_id": ("snippet", "categoryId"),
+    "privacy_status": ("status", "privacyStatus"),
+}
+
+
+def tags_length(tags: list[str]) -> int:
+    """Length of a tag list as YouTube counts it: commas count, and a tag with a
+    space counts as if it were quoted."""
+    quoted = sum(len(tag) + 2 if " " in tag else len(tag) for tag in tags)
+    return quoted + max(len(tags) - 1, 0)
+
+
+def validate_metadata(title: str | None, description: str | None, tags: list[str] | None) -> None:
+    """Reject values the API would refuse, before any request is made."""
+    if title is not None:
+        if not title.strip():
+            raise ToolError("title cannot be empty.")
+        if len(title) > TITLE_MAX_CHARS:
+            raise ToolError(f"title has {len(title)} characters; the limit is {TITLE_MAX_CHARS}.")
+        if "<" in title or ">" in title:
+            raise ToolError("title cannot contain < or >.")
+    if description is not None:
+        size = len(description.encode("utf-8"))
+        if size > DESCRIPTION_MAX_BYTES:
+            raise ToolError(
+                f"description is {size} bytes in UTF-8; the limit is {DESCRIPTION_MAX_BYTES}."
+            )
+        if "<" in description or ">" in description:
+            raise ToolError("description cannot contain < or >.")
+    if tags is not None:
+        if any(not tag.strip() for tag in tags):
+            raise ToolError("tags cannot contain an empty tag.")
+        length = tags_length(tags)
+        if length > TAGS_MAX_CHARS:
+            raise ToolError(
+                f"tags add up to {length} characters as YouTube counts them (commas count, "
+                f"tags with spaces count as quoted); the limit is {TAGS_MAX_CHARS}."
+            )
+
+
+def update_video(
     youtube: Any,
     video_id: str,
-    title: str | None,
-    description: str | None,
-    tags: list[str] | None,
-    category_id: str | None,
-    privacy_status: str | None,
+    requested: dict[str, Any],
+    *,
+    dry_run: bool,
 ) -> dict[str, Any]:
-    """Change the given fields of a video, keeping the others. Cost: 51 units."""
+    """Preview, or apply, a change to a video's metadata.
+
+    `requested` maps tool arguments (title, description, tags, category_id,
+    privacy_status) to new values; None means keep. Returns `{changed: false}`
+    when nothing would change, the diff and warnings for a dry run, and the
+    updated values after a write.
+    """
+    requested = {name: value for name, value in requested.items() if value is not None}
+    validate_metadata(requested.get("title"), requested.get("description"), requested.get("tags"))
+
     items = youtube.videos().list(id=video_id, part="snippet,status").execute().get("items", [])
     if not items:
         raise ToolError(f"Video {video_id} was not found, or this account cannot see it.")
-    snippet = items[0].get("snippet", {})
-    status = items[0].get("status", {})
-    if title is not None:
-        snippet["title"] = title
-    if description is not None:
-        snippet["description"] = description
-    if tags is not None:
-        snippet["tags"] = tags
-    if category_id is not None:
-        snippet["categoryId"] = category_id
-    if privacy_status is not None:
-        status["privacyStatus"] = privacy_status
-    updated = (
-        youtube.videos()
-        .update(part="snippet,status", body={"id": video_id, "snippet": snippet, "status": status})
-        .execute()
-    )
-    updated_snippet = updated.get("snippet", {})
+    current = {"snippet": items[0].get("snippet", {}), "status": items[0].get("status", {})}
+
+    changes: dict[str, dict[str, Any]] = {}
+    for name, value in requested.items():
+        part, prop = UPDATABLE[name]
+        before = current[part].get(prop, [] if prop == "tags" else None)
+        if before != value:
+            changes[name] = {"before": before, "after": value}
+    if not changes:
+        return {"changed": False, "video_id": video_id}
+
+    warnings = []
+    privacy = changes.get("privacy_status")
+    if privacy and privacy["after"] == "public":
+        warnings.append("The video becomes public: anyone can find and watch it.")
+    publish_at = current["status"].get("publishAt")
+    if privacy and privacy["after"] != "private" and publish_at:
+        warnings.append(f"The scheduled publish time ({publish_at}) is cleared.")
+    if "tags" in changes:
+        kept = set(changes["tags"]["after"])
+        dropped = [tag for tag in changes["tags"]["before"] if tag not in kept]
+        if dropped:
+            warnings.append(f"Replacing the tags drops {len(dropped)} existing tag(s): {dropped}.")
+
+    if dry_run:
+        return {
+            "dry_run": True,
+            "video_id": video_id,
+            "changes": changes,
+            "warnings": warnings,
+            "quota_cost": UPDATE_QUOTA_COST,
+        }
+
+    body: dict[str, Any] = {"id": video_id}
+    parts = sorted({UPDATABLE[name][0] for name in changes})
+    for part in parts:
+        writable = SNIPPET_WRITABLE if part == "snippet" else STATUS_WRITABLE
+        body[part] = {key: current[part][key] for key in writable if key in current[part]}
+    for name in changes:
+        part, prop = UPDATABLE[name]
+        body[part][prop] = changes[name]["after"]
+    if "status" in body and body["status"].get("privacyStatus") != "private":
+        body["status"].pop("publishAt", None)
+
+    updated = youtube.videos().update(part=",".join(parts), body=body).execute()
+    applied = {}
+    for name in changes:
+        part, prop = UPDATABLE[name]
+        applied[name] = updated.get(part, {}).get(prop)
     return {
-        "video_id": updated.get("id"),
-        "title": updated_snippet.get("title"),
-        "description": updated_snippet.get("description"),
-        "tags": updated_snippet.get("tags", []),
-        "category_id": updated_snippet.get("categoryId"),
-        "privacy_status": updated.get("status", {}).get("privacyStatus"),
+        "dry_run": False,
+        "video_id": video_id,
+        "changes": changes,
+        "warnings": warnings,
+        "applied": applied,
     }
 
 
