@@ -203,6 +203,7 @@ uv run pytest              # tests; no test reaches Google
 uv run ruff check          # lint
 uv run ruff format         # format
 uv build                   # wheel and sdist in dist/
+uv run python scripts/live_smoke.py --help   # live checks against your channel; not run in CI
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).
