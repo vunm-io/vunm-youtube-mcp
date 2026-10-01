@@ -44,6 +44,11 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
 ]
 
+[project.optional-dependencies]
+# Transcript fallback when youtube-transcript-api is blocked. yt-dlp needs a
+# JavaScript runtime (Deno) for YouTube; "default" adds its challenge solver.
+ytdlp = ["yt-dlp[default]==2026.8.19"]
+
 [project.urls]
 Homepage = "https://github.com/vunm-io/vunm-youtube-mcp"
 Repository = "https://github.com/vunm-io/vunm-youtube-mcp"
@@ -57,6 +62,7 @@ dev = [
     "pytest==9.1.1",
     "pytest-asyncio==1.4.0",
     "ruff==0.16.9",
+    "yt-dlp==2026.8.19",
 ]
 
 [tool.hatch.build.targets.wheel]

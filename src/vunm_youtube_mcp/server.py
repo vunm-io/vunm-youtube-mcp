@@ -63,9 +63,15 @@ AUTH_INSTRUCTION = (
 )
 
 
-def build_server(settings: Settings, provider: ServiceProvider | None = None) -> FastMCP:
-    """A server for `settings`, reaching Google through `provider`."""
+def build_server(
+    settings: Settings,
+    provider: ServiceProvider | None = None,
+    transcripts: transcript.TranscriptBackends | None = None,
+) -> FastMCP:
+    """A server for `settings`, reaching Google through `provider` and fetching
+    transcripts through `transcripts`; both default to the real backends."""
     provider = provider or GoogleServiceProvider(settings)
+    backends = transcripts or transcript.TranscriptBackends()
     mode = settings.mode
     server = FastMCP(
         name="vunm-youtube-mcp",
@@ -143,18 +149,36 @@ def build_server(settings: Settings, provider: ServiceProvider | None = None) ->
     @server.tool(title="Video transcript", annotations=READ)
     def youtube_get_transcript(
         video_id_or_url: Annotated[
-            str, Field(description="A video ID or a YouTube URL (watch, youtu.be, shorts).")
+            str, Field(description="A video ID or a YouTube URL (watch, youtu.be, shorts, live).")
         ],
         languages: Annotated[
             list[str] | None,
             Field(description="Language codes in order of preference; default vi, en."),
         ] = None,
         include_timestamps: bool = True,
+        max_chars: Annotated[
+            int,
+            Field(
+                ge=1_000,
+                le=1_000_000,
+                description="Cut the text at a line boundary after this many characters.",
+            ),
+        ] = transcript.DEFAULT_MAX_CHARS,
     ) -> dict[str, Any]:
-        """The transcript of a public video, from its caption tracks. Uses no YouTube
-        Data API quota and needs no authorization."""
-        return transcript.get_video_transcript(
-            video_id_or_url, languages or ["vi", "en"], include_timestamps
+        """The transcript of a public video, from its caption tracks: a manually
+        created track in the first available language, else an auto-generated one.
+
+        Returns `text` (lines prefixed [MM:SS] unless include_timestamps is false),
+        `language_code`, `is_generated`, `source` (youtube-transcript-api, or yt-dlp
+        when the first is blocked), and `truncated`/`total_chars` when the text was
+        cut at max_chars (default 50,000). Uses no YouTube Data API quota and needs
+        no authorization."""
+        return transcript.get_transcript(
+            video_id_or_url,
+            languages or list(transcript.DEFAULT_LANGUAGES),
+            include_timestamps,
+            max_chars,
+            backends,
         )
 
     @server.tool(title="Video comments", annotations=READ)

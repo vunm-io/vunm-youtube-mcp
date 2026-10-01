@@ -60,9 +60,11 @@ def provider():
 def make_server(provider, credentials_dir):
     """Build a server for a mode, wired to the fake provider."""
 
-    def _make(mode: Mode = Mode.FULL, **settings):
+    def _make(mode: Mode = Mode.FULL, transcripts=None, **settings):
         return build_server(
-            Settings(mode=mode, credentials_dir=credentials_dir, **settings), provider
+            Settings(mode=mode, credentials_dir=credentials_dir, **settings),
+            provider,
+            transcripts,
         )
 
     return _make
@@ -72,8 +74,10 @@ def make_server(provider, credentials_dir):
 def call_tool(make_server):
     """Call a tool through the in-memory MCP client; returns the CallToolResult."""
 
-    async def _call(name: str, arguments: dict | None = None, *, mode: Mode = Mode.FULL):
-        async with Client(make_server(mode)) as client:
+    async def _call(
+        name: str, arguments: dict | None = None, *, mode: Mode = Mode.FULL, transcripts=None
+    ):
+        async with Client(make_server(mode, transcripts)) as client:
             return await client.call_tool(name, arguments or {}, raise_on_error=False)
 
     return _call
