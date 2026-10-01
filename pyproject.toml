@@ -1,23 +1,27 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling==1.32.4"]
 build-backend = "hatchling.build"
 
 [project]
 name = "vunm-youtube-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "Custom Model Context Protocol (MCP) server for YouTube Studio analytics, video metadata management, and transcript extraction."
 readme = "README.md"
 license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "Vu Nguyen", email = "vunm.dev@gmail.com" }
 ]
 requires-python = ">=3.10"
 dependencies = [
-    "fastmcp>=0.4.0",
-    "google-api-python-client>=2.100.0",
-    "google-auth-oauthlib>=1.2.0",
-    "google-auth-httplib2>=0.2.0",
-    "youtube-transcript-api>=0.6.2",
+    "fastmcp==4.0.10",
+    "google-api-python-client==2.200.0",
+    "google-auth==2.59.1",
+    "google-auth-httplib2==0.4.3",
+    "google-auth-oauthlib==1.5.0",
+    "platformdirs==4.12.2",
+    "tzdata==2026.4; sys_platform == 'win32'",
+    "youtube-transcript-api==1.2.4",
 ]
 keywords = [
     "mcp",
@@ -31,7 +35,6 @@ keywords = [
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -41,10 +44,37 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
 ]
 
+[project.optional-dependencies]
+# Transcript fallback when youtube-transcript-api is blocked. yt-dlp needs a
+# JavaScript runtime (Deno) for YouTube; "default" adds its challenge solver.
+ytdlp = ["yt-dlp[default]==2026.8.19"]
+
 [project.urls]
 Homepage = "https://github.com/vunm-io/vunm-youtube-mcp"
 Repository = "https://github.com/vunm-io/vunm-youtube-mcp"
 Issues = "https://github.com/vunm-io/vunm-youtube-mcp/issues"
 
 [project.scripts]
-vunm-youtube-mcp = "src.server:mcp.run"
+vunm-youtube-mcp = "vunm_youtube_mcp.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
+    "ruff==0.16.9",
+    "yt-dlp==2026.8.19",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/vunm_youtube_mcp"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+extend-select = ["I", "UP", "B"]
