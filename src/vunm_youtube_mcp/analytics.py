@@ -1,121 +1,98 @@
-"""YouTube Analytics API v2 reporting module.
+"""Channel and video reports through the YouTube Analytics API v2.
 
-Fetches key channel and video performance metrics such as views, watch time,
-retention, and subscriber gains/losses across specified date ranges.
+YouTube Analytics dates are calendar days in Pacific Time, and the newest days
+fill in with a lag, so the default window is the 28 days that end 2 days before
+today in Pacific Time.
 """
 
-from datetime import datetime, timedelta, timezone
+from __future__ import annotations
+
+from datetime import date, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
-from .auth import get_youtube_analytics_service
+from fastmcp.exceptions import ToolError
+
+REPORTING_TZ = ZoneInfo("America/Los_Angeles")
+DEFAULT_WINDOW_DAYS = 28
+REPORTING_LAG_DAYS = 2
+
+CHANNEL_METRICS = (
+    "views,estimatedMinutesWatched,averageViewDuration,averageViewPercentage,"
+    "subscribersGained,subscribersLost,likes,comments,shares"
+)
+VIDEO_METRICS = (
+    "views,estimatedMinutesWatched,averageViewDuration,averageViewPercentage,likes,shares"
+)
+SORT_BY_DIMENSION = {"day": "day", "month": "month", "country": "-views"}
 
 
-def get_channel_analytics(
-    start_date: str | None = None,
-    end_date: str | None = None,
-    dimensions: str | None = "day",
-) -> dict[str, Any]:
-    """Query YouTube Analytics reports for the authenticated channel.
+def reporting_today() -> date:
+    """Today's date in Pacific Time, the time zone YouTube Analytics reports in."""
+    return datetime.now(REPORTING_TZ).date()
 
-    Args:
-        start_date: Format 'YYYY-MM-DD'. Defaults to 28 days ago.
-        end_date: Format 'YYYY-MM-DD'. Defaults to yesterday (YouTube analytics has a 2-day lag).
-        dimensions: Aggregation dimension (e.g. 'day', 'month', 'country', or None).
+
+def resolve_window(
+    start_date: date | None, end_date: date | None, today: date | None = None
+) -> tuple[date, date]:
+    """Fill in the default window and check the order of the dates."""
+    end = end_date or (today or reporting_today()) - timedelta(days=REPORTING_LAG_DAYS)
+    start = start_date or end - timedelta(days=DEFAULT_WINDOW_DAYS - 1)
+    if start > end:
+        raise ToolError(f"start_date {start} is after end_date {end}.")
+    return start, end
+
+
+def _rows(response: dict[str, Any]) -> tuple[list[str], list[dict[str, Any]]]:
+    columns = [header.get("name") for header in response.get("columnHeaders", [])]
+    rows = [dict(zip(columns, row, strict=True)) for row in response.get("rows", [])]
+    return columns, rows
+
+
+def channel_report(analytics: Any, start: date, end: date, dimension: str | None) -> dict[str, Any]:
+    """Channel metrics for [start, end], per day, month or country, or as totals.
+
+    Month reports need both dates on the first of a month, so they are moved
+    to the first of their months; the dates used are in the result.
     """
-    analytics = get_youtube_analytics_service()
-
-    # Default to past 28 days ending 2 days ago (lag in data availability)
-    today = datetime.now(timezone.utc).date()
-    if not end_date:
-        end_date = (today - timedelta(days=2)).strftime("%Y-%m-%d")
-    if not start_date:
-        start_date = (today - timedelta(days=30)).strftime("%Y-%m-%d")
-
-    metrics = (
-        "views,estimatedMinutesWatched,averageViewDuration,"
-        "averageViewPercentage,subscribersGained,subscribersLost,likes,comments"
-    )
-
-    request_kwargs: dict[str, Any] = {
+    if dimension == "month":
+        start, end = start.replace(day=1), end.replace(day=1)
+    query: dict[str, Any] = {
         "ids": "channel==MINE",
-        "startDate": start_date,
-        "endDate": end_date,
-        "metrics": metrics,
+        "startDate": start.isoformat(),
+        "endDate": end.isoformat(),
+        "metrics": CHANNEL_METRICS,
     }
-
-    if dimensions:
-        request_kwargs["dimensions"] = dimensions
-        if dimensions == "day":
-            request_kwargs["sort"] = "day"
-
-    try:
-        response = analytics.reports().query(**request_kwargs).execute()
-    except Exception as e:  # noqa: BLE001 - v0.1 returns error dicts
-        return {"error": f"Analytics query failed: {e}"}
-
-    column_headers = [header.get("name") for header in response.get("columnHeaders", [])]
-    rows = response.get("rows", [])
-
-    formatted_rows = []
-    for row in rows:
-        formatted_rows.append(dict(zip(column_headers, row, strict=False)))
-
+    if dimension:
+        query["dimensions"] = dimension
+        query["sort"] = SORT_BY_DIMENSION[dimension]
+    columns, rows = _rows(analytics.reports().query(**query).execute())
     return {
-        "start_date": start_date,
-        "end_date": end_date,
-        "total_records": len(rows),
-        "columns": column_headers,
-        "data": formatted_rows,
+        "start_date": start.isoformat(),
+        "end_date": end.isoformat(),
+        "dimension": dimension,
+        "columns": columns,
+        "rows": rows,
     }
 
 
-def get_video_analytics(
-    video_id: str,
-    start_date: str | None = None,
-    end_date: str | None = None,
-) -> dict[str, Any]:
-    """Query specific performance analytics for a single video.
-
-    Args:
-        video_id: The 11-character YouTube video ID.
-        start_date: Format 'YYYY-MM-DD'. Defaults to 28 days ago.
-        end_date: Format 'YYYY-MM-DD'. Defaults to 2 days ago.
-    """
-    analytics = get_youtube_analytics_service()
-
-    today = datetime.now(timezone.utc).date()
-    if not end_date:
-        end_date = (today - timedelta(days=2)).strftime("%Y-%m-%d")
-    if not start_date:
-        start_date = (today - timedelta(days=30)).strftime("%Y-%m-%d")
-
-    metrics = "views,estimatedMinutesWatched,averageViewDuration,averageViewPercentage,likes,shares"
-
-    try:
-        response = (
-            analytics.reports()
-            .query(
-                ids="channel==MINE",
-                filters=f"video=={video_id}",
-                startDate=start_date,
-                endDate=end_date,
-                metrics=metrics,
-            )
-            .execute()
+def video_report(analytics: Any, video_id: str, start: date, end: date) -> dict[str, Any]:
+    """Totals for one video over [start, end]."""
+    response = (
+        analytics.reports()
+        .query(
+            ids="channel==MINE",
+            filters=f"video=={video_id}",
+            startDate=start.isoformat(),
+            endDate=end.isoformat(),
+            metrics=VIDEO_METRICS,
         )
-    except Exception as e:  # noqa: BLE001 - v0.1 returns error dicts
-        return {"error": f"Video analytics query failed: {e}"}
-
-    column_headers = [header.get("name") for header in response.get("columnHeaders", [])]
-    rows = response.get("rows", [])
-
-    formatted_rows = []
-    for row in rows:
-        formatted_rows.append(dict(zip(column_headers, row, strict=False)))
-
+        .execute()
+    )
+    _, rows = _rows(response)
     return {
         "video_id": video_id,
-        "start_date": start_date,
-        "end_date": end_date,
-        "data": formatted_rows[0] if formatted_rows else {},
+        "start_date": start.isoformat(),
+        "end_date": end.isoformat(),
+        "metrics": rows[0] if rows else {},
     }

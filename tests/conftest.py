@@ -11,6 +11,8 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from fakes import FakeProvider
+from fastmcp import Client
 
 from vunm_youtube_mcp import auth
 from vunm_youtube_mcp.config import (
@@ -19,7 +21,9 @@ from vunm_youtube_mcp.config import (
     ENV_LOG_LEVEL,
     ENV_MODE,
     Mode,
+    Settings,
 )
+from vunm_youtube_mcp.server import build_server
 
 
 @pytest.fixture(autouse=True)
@@ -39,14 +43,40 @@ def credentials_dir(tmp_path, monkeypatch):
         monkeypatch.delenv(name, raising=False)
     directory = tmp_path / "credentials"
     monkeypatch.setenv(ENV_CREDENTIALS_DIR, str(directory))
-    monkeypatch.setattr(auth, "_youtube_data_service", None)
-    monkeypatch.setattr(auth, "_youtube_analytics_service", None)
     return directory
 
 
 def _utc_naive(delta: timedelta) -> datetime:
     # google-auth keeps token expiry as a naive UTC datetime.
     return datetime.now(timezone.utc).replace(tzinfo=None) + delta
+
+
+@pytest.fixture
+def provider():
+    return FakeProvider()
+
+
+@pytest.fixture
+def make_server(provider, credentials_dir):
+    """Build a server for a mode, wired to the fake provider."""
+
+    def _make(mode: Mode = Mode.FULL, **settings):
+        return build_server(
+            Settings(mode=mode, credentials_dir=credentials_dir, **settings), provider
+        )
+
+    return _make
+
+
+@pytest.fixture
+def call_tool(make_server):
+    """Call a tool through the in-memory MCP client; returns the CallToolResult."""
+
+    async def _call(name: str, arguments: dict | None = None, *, mode: Mode = Mode.FULL):
+        async with Client(make_server(mode)) as client:
+            return await client.call_tool(name, arguments or {}, raise_on_error=False)
+
+    return _call
 
 
 @pytest.fixture

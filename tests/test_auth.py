@@ -18,6 +18,7 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 
 from vunm_youtube_mcp import auth, cli
 from vunm_youtube_mcp.config import Mode, Settings
+from vunm_youtube_mcp.server import build_server
 
 posix_only = pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
 
@@ -156,9 +157,8 @@ async def test_tool_call_without_token_returns_the_auth_hint(monkeypatch):
 
     monkeypatch.setattr(InstalledAppFlow, "from_client_secrets_file", browser_flow)
     monkeypatch.setattr(InstalledAppFlow, "run_local_server", browser_flow)
-    from vunm_youtube_mcp.server import mcp
 
-    async with Client(mcp) as client:
+    async with Client(build_server(Settings.from_env())) as client:
         result = await client.call_tool("youtube_channel_stats", {}, raise_on_error=False)
 
     assert result.is_error

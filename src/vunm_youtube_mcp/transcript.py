@@ -1,101 +1,67 @@
-"""YouTube video transcript extraction module.
+"""Video transcripts from YouTube's caption tracks, without YouTube Data API quota."""
 
-Extracts captions/transcripts directly without consuming YouTube Data API quota,
-supporting multiple languages and formatted timestamp outputs.
-"""
+from __future__ import annotations
 
 import re
 from typing import Any
 
+from fastmcp.exceptions import ToolError
 from youtube_transcript_api import NoTranscriptFound, TranscriptsDisabled, YouTubeTranscriptApi
+
+VIDEO_ID = re.compile(r"^[A-Za-z0-9_-]{11}$")
+_URL_PATTERNS = (
+    re.compile(r"youtu\.be/([A-Za-z0-9_-]{11})"),
+    re.compile(r"[?&]v=([A-Za-z0-9_-]{11})"),
+    re.compile(r"youtube\.com/(?:shorts|live|embed)/([A-Za-z0-9_-]{11})"),
+)
 
 
 def extract_video_id(url_or_id: str) -> str:
-    """Extract YouTube 11-character video ID from a raw ID or various URL formats."""
-    url_or_id = url_or_id.strip()
-    # Match standard 11-character alphanumeric ID directly
-    if re.match(r"^[a-zA-Z0-9_-]{11}$", url_or_id):
-        return url_or_id
-
-    # Match https://youtu.be/<id>
-    short_match = re.search(r"youtu\.be/([a-zA-Z0-9_-]{11})", url_or_id)
-    if short_match:
-        return short_match.group(1)
-
-    # Match https://www.youtube.com/watch?v=<id>
-    watch_match = re.search(r"[?&]v=([a-zA-Z0-9_-]{11})", url_or_id)
-    if watch_match:
-        return watch_match.group(1)
-
-    # Match https://www.youtube.com/shorts/<id>
-    shorts_match = re.search(r"youtube\.com/shorts/([a-zA-Z0-9_-]{11})", url_or_id)
-    if shorts_match:
-        return shorts_match.group(1)
-
-    return url_or_id
+    """The 11-character video ID in a raw ID or a YouTube URL."""
+    candidate = url_or_id.strip()
+    if VIDEO_ID.match(candidate):
+        return candidate
+    for pattern in _URL_PATTERNS:
+        match = pattern.search(candidate)
+        if match:
+            return match.group(1)
+    raise ToolError(f"{url_or_id!r} is not a YouTube video ID or URL.")
 
 
 def format_timestamp(seconds: float) -> str:
-    """Convert floating-point seconds to [MM:SS] or [HH:MM:SS] format."""
-    total_seconds = int(seconds)
-    hours = total_seconds // 3600
-    minutes = (total_seconds % 3600) // 60
-    secs = total_seconds % 60
-    if hours > 0:
+    """Seconds as MM:SS, or HH:MM:SS from one hour on."""
+    total = int(seconds)
+    hours, minutes, secs = total // 3600, (total % 3600) // 60, total % 60
+    if hours:
         return f"{hours:02d}:{minutes:02d}:{secs:02d}"
     return f"{minutes:02d}:{secs:02d}"
 
 
 def get_video_transcript(
-    video_id_or_url: str,
-    languages: list[str] | None = None,
-    include_timestamps: bool = True,
+    video_id_or_url: str, languages: list[str], include_timestamps: bool
 ) -> dict[str, Any]:
-    """Retrieve transcript/subtitles for a YouTube video.
-
-    Args:
-        video_id_or_url: Full YouTube URL or 11-character video ID.
-        languages: List of preferred language codes, e.g. ['vi', 'en'].
-        include_timestamps: If True, prefixes lines with formatted timestamps.
-    """
+    """The transcript of a video in the first available language of `languages`."""
     video_id = extract_video_id(video_id_or_url)
-    lang_preference = languages or ["vi", "en"]
-
     try:
-        api = YouTubeTranscriptApi()
-        if hasattr(api, "fetch"):
-            fetched = api.fetch(video_id, languages=lang_preference)
-            transcript_list = fetched.to_raw_data()
-        elif hasattr(YouTubeTranscriptApi, "get_transcript"):
-            transcript_list = YouTubeTranscriptApi.get_transcript(
-                video_id, languages=lang_preference
-            )
-        else:
-            raise RuntimeError("Unsupported youtube-transcript-api version.")
-    except TranscriptsDisabled:
-        return {"error": f"Transcripts are disabled for video '{video_id}'."}
-    except NoTranscriptFound:
-        return {
-            "error": f"No transcript found in languages {lang_preference} for video '{video_id}'."
-        }
-    except Exception as e:  # noqa: BLE001 - v0.1 returns error dicts
-        return {"error": f"Failed to retrieve transcript: {e}"}
+        segments = YouTubeTranscriptApi().fetch(video_id, languages=languages).to_raw_data()
+    except TranscriptsDisabled as exc:
+        raise ToolError(f"Transcripts are disabled for video {video_id}.") from exc
+    except NoTranscriptFound as exc:
+        raise ToolError(f"Video {video_id} has no transcript in {languages}.") from exc
+    except Exception as exc:
+        raise ToolError(f"Could not retrieve the transcript of {video_id}: {exc}") from exc
 
-    formatted_lines = []
-    full_text_parts = []
-
-    for entry in transcript_list:
-        text = entry.get("text", "").strip()
-        start = entry.get("start", 0.0)
-        full_text_parts.append(text)
+    lines, texts = [], []
+    for segment in segments:
+        text = segment.get("text", "").strip()
+        texts.append(text)
         if include_timestamps:
-            formatted_lines.append(f"[{format_timestamp(start)}] {text}")
+            lines.append(f"[{format_timestamp(segment.get('start', 0.0))}] {text}")
         else:
-            formatted_lines.append(text)
-
+            lines.append(text)
     return {
         "video_id": video_id,
-        "segment_count": len(transcript_list),
-        "raw_text": " ".join(full_text_parts),
-        "formatted_transcript": "\n".join(formatted_lines),
+        "segment_count": len(segments),
+        "raw_text": " ".join(texts),
+        "formatted_transcript": "\n".join(lines),
     }

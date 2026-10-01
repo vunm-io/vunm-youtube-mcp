@@ -17,7 +17,8 @@ from fastmcp import Client
 from fastmcp.client.transports import StdioTransport
 from mcp import types
 
-from vunm_youtube_mcp.server import mcp
+from vunm_youtube_mcp.config import Settings
+from vunm_youtube_mcp.server import build_server
 
 SERVE = [sys.executable, "-m", "vunm_youtube_mcp", "serve"]
 TIMEOUT = 60
@@ -34,7 +35,7 @@ def _server_env(credentials_dir) -> dict[str, str]:
 
 
 async def _expected_tool_names() -> set[str]:
-    async with Client(mcp) as client:
+    async with Client(build_server(Settings())) as client:
         return {tool.name for tool in await client.list_tools()}
 
 

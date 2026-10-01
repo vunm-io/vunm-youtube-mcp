@@ -19,7 +19,6 @@ from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
-from googleapiclient.discovery import Resource, build
 
 from vunm_youtube_mcp.config import Mode, Settings
 
@@ -178,29 +177,3 @@ def find_legacy_credentials(settings: Settings) -> Path | None:
         if candidate.is_dir() and has_files:
             return candidate
     return None
-
-
-# Service clients, built on first use. Settings come from the environment,
-# which `serve` validated at startup.
-_youtube_data_service: Resource | None = None
-_youtube_analytics_service: Resource | None = None
-
-
-def get_youtube_data_service() -> Resource:
-    """An authenticated YouTube Data API v3 client."""
-    global _youtube_data_service
-    if _youtube_data_service is None:
-        creds = load_credentials(Settings.from_env())
-        _youtube_data_service = build("youtube", "v3", credentials=creds, cache_discovery=False)
-    return _youtube_data_service
-
-
-def get_youtube_analytics_service() -> Resource:
-    """An authenticated YouTube Analytics API v2 client."""
-    global _youtube_analytics_service
-    if _youtube_analytics_service is None:
-        creds = load_credentials(Settings.from_env())
-        _youtube_analytics_service = build(
-            "youtubeAnalytics", "v2", credentials=creds, cache_discovery=False
-        )
-    return _youtube_analytics_service

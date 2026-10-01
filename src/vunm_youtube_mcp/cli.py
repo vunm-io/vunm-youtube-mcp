@@ -63,9 +63,9 @@ def configure_logging(level: str) -> None:
 
 
 def _serve(settings: Settings) -> int:
-    from vunm_youtube_mcp.server import mcp
+    from vunm_youtube_mcp.server import build_server
 
-    mcp.run(transport="stdio", show_banner=False, log_level=settings.log_level)
+    build_server(settings).run(transport="stdio", show_banner=False, log_level=settings.log_level)
     return 0
 
 

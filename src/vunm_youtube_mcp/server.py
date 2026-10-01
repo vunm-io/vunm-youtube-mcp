@@ -1,163 +1,173 @@
-"""Custom YouTube Model Context Protocol (MCP) Server.
+"""The MCP server: tool definitions and their wiring to the Google APIs.
 
-Exposes a comprehensive suite of tools for YouTube Channel Analytics,
-YouTube Studio Video Management, Transcript Extraction, and Comment Handling.
+`build_server(settings, provider)` returns a configured FastMCP server. Tests
+pass a fake provider; `serve` passes nothing and gets the Google one. Building
+a server does no network work; the first tool call loads the token.
 """
 
-from typing import Any
+from __future__ import annotations
+
+from datetime import date
+from typing import Annotated, Any, Literal
 
 from fastmcp import FastMCP
+from mcp.types import ToolAnnotations
+from pydantic import Field
 
-from .analytics import get_channel_analytics, get_video_analytics
-from .studio import (
-    get_channel_overview,
-    get_video_comments,
-    get_video_details,
-    list_recent_videos,
-    update_video_metadata,
+from vunm_youtube_mcp import __version__, analytics, studio, transcript
+from vunm_youtube_mcp.config import Settings
+from vunm_youtube_mcp.errors import google_api_errors
+from vunm_youtube_mcp.services import GoogleServiceProvider, ServiceProvider
+
+VIDEO_ID_PATTERN = r"^[A-Za-z0-9_-]{11}$"
+
+VideoId = Annotated[
+    str, Field(pattern=VIDEO_ID_PATTERN, description="The 11-character YouTube video ID.")
+]
+ReportDate = Annotated[
+    date | None,
+    Field(description="A calendar day as YYYY-MM-DD, in Pacific Time as YouTube reports it."),
+]
+Dimension = Literal["day", "month", "country"]
+
+READ = ToolAnnotations(read_only_hint=True, open_world_hint=True)
+
+INSTRUCTIONS = (
+    "Tools for the YouTube channel authorized on this machine: channel statistics, "
+    "analytics reports, uploads, video metadata, comments and transcripts. "
+    "If a tool reports that authorization is needed, ask the user to run the "
+    "command it names in a terminal; do not retry until they have."
 )
-from .transcript import get_video_transcript
-
-# Initialize FastMCP Server
-mcp = FastMCP(
-    name="YouTube Management MCP",
-    instructions=(
-        "You are connected to a Custom YouTube MCP Server with authenticated access to the user's YouTube channel. "
-        "You can inspect channel metrics, fetch deep analytics reports, browse uploads, edit video metadata, "
-        "read comments, and extract transcripts for video summarization."
-    ),
-)
 
 
-@mcp.tool()
-def youtube_channel_stats() -> dict[str, Any]:
-    """Retrieve high-level statistics and metadata for the authenticated YouTube channel.
+def build_server(settings: Settings, provider: ServiceProvider | None = None) -> FastMCP:
+    """A server for `settings`, reaching Google through `provider`."""
+    provider = provider or GoogleServiceProvider(settings)
+    mode = settings.mode
+    server = FastMCP(name="vunm-youtube-mcp", instructions=INSTRUCTIONS, version=__version__)
+    uploads_cache: dict[str, str] = {}
 
-    Returns subscriber count, total view count, video count, and channel profile information.
-    """
-    return get_channel_overview()
+    def uploads_playlist() -> str:
+        if "id" not in uploads_cache:
+            uploads_cache["id"] = studio.uploads_playlist_id(provider.data())
+        return uploads_cache["id"]
 
+    @server.tool(title="Channel statistics", annotations=READ)
+    def youtube_channel_stats() -> dict[str, Any]:
+        """Statistics and profile of the authorized channel: subscribers, total views,
+        video count, custom URL and the uploads playlist. Quota: 1 unit."""
+        with google_api_errors(mode):
+            return studio.channel_overview(provider.data())
 
-@mcp.tool()
-def youtube_analytics_report(
-    start_date: str | None = None,
-    end_date: str | None = None,
-    dimensions: str | None = "day",
-) -> dict[str, Any]:
-    """Fetch performance analytics reports for the channel via YouTube Analytics API.
+    @server.tool(title="Channel analytics report", annotations=READ)
+    def youtube_analytics_report(
+        start_date: ReportDate = None,
+        end_date: ReportDate = None,
+        dimensions: Annotated[
+            Dimension | None,
+            Field(description="Group rows by day, month or country; null for totals."),
+        ] = "day",
+    ) -> dict[str, Any]:
+        """Channel metrics from YouTube Analytics: views, watch time, average view
+        duration and percentage, subscribers gained and lost, likes, comments, shares.
 
-    Args:
-        start_date: Start date in 'YYYY-MM-DD' format (e.g. '2026-08-01'). Defaults to 30 days ago.
-        end_date: End date in 'YYYY-MM-DD' format. Defaults to 2 days ago (due to YouTube API reporting lag).
-        dimensions: Dimension to group by, such as 'day', 'month', or None for overall total.
-    """
-    return get_channel_analytics(
-        start_date=start_date or None,
-        end_date=end_date or None,
-        dimensions=dimensions or "day",
-    )
+        Defaults to the 28 days that end 2 days ago (Pacific Time; recent days fill
+        in late). Month reports use the first day of each month for both dates.
+        Uses YouTube Analytics API quota, not YouTube Data API quota."""
+        start, end = analytics.resolve_window(start_date, end_date)
+        with google_api_errors(mode):
+            return analytics.channel_report(provider.analytics(), start, end, dimensions)
 
+    @server.tool(title="Video analytics", annotations=READ)
+    def youtube_video_analytics(
+        video_id: VideoId,
+        start_date: ReportDate = None,
+        end_date: ReportDate = None,
+    ) -> dict[str, Any]:
+        """Totals for one video from YouTube Analytics: views, watch time, average view
+        duration and percentage, likes and shares.
 
-@mcp.tool()
-def youtube_video_analytics(
-    video_id: str,
-    start_date: str | None = None,
-    end_date: str | None = None,
-) -> dict[str, Any]:
-    """Fetch deep performance analytics for a single video (views, watch time, retention, shares).
+        Defaults to the 28 days that end 2 days ago (Pacific Time)."""
+        start, end = analytics.resolve_window(start_date, end_date)
+        with google_api_errors(mode):
+            return analytics.video_report(provider.analytics(), video_id, start, end)
 
-    Args:
-        video_id: The 11-character YouTube video ID.
-        start_date: Start date in 'YYYY-MM-DD' format.
-        end_date: End date in 'YYYY-MM-DD' format.
-    """
-    return get_video_analytics(
-        video_id=video_id,
-        start_date=start_date or None,
-        end_date=end_date or None,
-    )
+    @server.tool(title="List channel uploads", annotations=READ)
+    def youtube_list_videos(
+        max_results: Annotated[int, Field(ge=1, le=50, description="Videos per page.")] = 10,
+        page_token: Annotated[
+            str | None, Field(description="next_page_token from the previous page.")
+        ] = None,
+    ) -> dict[str, Any]:
+        """Uploads of the authorized channel, newest first, including private and
+        unlisted videos, with view, like and comment counts. Returns
+        {videos, next_page_token}; pass next_page_token to get the next page.
+        Quota: 2 units a page (plus 1 on the first call)."""
+        with google_api_errors(mode):
+            return studio.list_videos(provider.data(), uploads_playlist(), max_results, page_token)
 
+    @server.tool(title="Video details", annotations=READ)
+    def youtube_get_video(video_id: VideoId) -> dict[str, Any]:
+        """Metadata and settings of a video: title, full description, tags, category,
+        privacy status, duration and statistics. Quota: 1 unit."""
+        with google_api_errors(mode):
+            return studio.video_details(provider.data(), video_id)
 
-@mcp.tool()
-def youtube_list_videos(max_results: int = 10) -> list[dict[str, Any]]:
-    """List recent videos uploaded to the channel (including public, unlisted, and private videos).
+    @server.tool(title="Update video metadata")
+    def youtube_update_video(
+        video_id: VideoId,
+        title: str | None = None,
+        description: str | None = None,
+        tags: list[str] | None = None,
+        category_id: str | None = None,
+        privacy_status: Literal["public", "unlisted", "private"] | None = None,
+    ) -> dict[str, Any]:
+        """Change the title, description, tags, category or privacy status of a video.
+        Fields left out keep their current values; tags replace the whole list.
+        Quota: 51 units."""
+        with google_api_errors(mode):
+            return studio.update_video_metadata(
+                provider.data(), video_id, title, description, tags, category_id, privacy_status
+            )
 
-    Args:
-        max_results: Number of recent videos to retrieve (between 1 and 50).
-    """
-    return list_recent_videos(max_results=max_results)
+    @server.tool(title="Video transcript", annotations=READ)
+    def youtube_get_transcript(
+        video_id_or_url: Annotated[
+            str, Field(description="A video ID or a YouTube URL (watch, youtu.be, shorts).")
+        ],
+        languages: Annotated[
+            list[str] | None,
+            Field(description="Language codes in order of preference; default vi, en."),
+        ] = None,
+        include_timestamps: bool = True,
+    ) -> dict[str, Any]:
+        """The transcript of a public video, from its caption tracks. Uses no YouTube
+        Data API quota and needs no authorization."""
+        return transcript.get_video_transcript(
+            video_id_or_url, languages or ["vi", "en"], include_timestamps
+        )
 
+    @server.tool(title="Video comments", annotations=READ)
+    def youtube_get_comments(
+        video_id: VideoId,
+        max_results: Annotated[int, Field(ge=1, le=100, description="Comments to return.")] = 20,
+    ) -> list[dict[str, Any]]:
+        """Top-level comments on a video, most relevant first, as plain text, with like
+        and reply counts. Quota: 1 unit."""
+        with google_api_errors(mode):
+            return studio.video_comments(provider.data(), video_id, max_results)
 
-@mcp.tool()
-def youtube_get_video(video_id: str) -> dict[str, Any]:
-    """Retrieve current metadata and settings for a specific video.
-
-    Returns title, full description, list of tags, category ID, privacy status, and view/like stats.
-    """
-    return get_video_details(video_id=video_id)
-
-
-@mcp.tool()
-def youtube_update_video(
-    video_id: str,
-    title: str | None = None,
-    description: str | None = None,
-    tags: list[str] | None = None,
-    category_id: str | None = None,
-    privacy_status: str | None = None,
-) -> dict[str, Any]:
-    """Update title, description, tags, category, and/or privacy status for a video on YouTube Studio.
-
-    Only provide the fields you wish to modify. Unspecified fields will retain their existing values.
-
-    Args:
-        video_id: The 11-character YouTube video ID to edit.
-        title: New video title.
-        description: New video description.
-        tags: Complete replacement list of video tags/keywords.
-        category_id: Numeric YouTube video category ID (e.g. '27' for Education, '28' for Science & Tech).
-        privacy_status: One of 'public', 'unlisted', or 'private'.
-    """
-    return update_video_metadata(
-        video_id=video_id,
-        title=title,
-        description=description,
-        tags=tags,
-        category_id=category_id,
-        privacy_status=privacy_status,
-    )
-
-
-@mcp.tool()
-def youtube_get_transcript(
-    video_id_or_url: str,
-    languages: list[str] | None = None,
-    include_timestamps: bool = True,
-) -> dict[str, Any]:
-    """Extract subtitles/transcript from a YouTube video for AI summarization and content analysis.
-
-    Args:
-        video_id_or_url: YouTube URL (e.g. 'https://www.youtube.com/watch?v=...' or 11-character ID).
-        languages: Preferred language codes in order of priority (default: ['vi', 'en']).
-        include_timestamps: Whether to prefix lines with timestamps [MM:SS].
-    """
-    return get_video_transcript(
-        video_id_or_url=video_id_or_url,
-        languages=languages or ["vi", "en"],
-        include_timestamps=include_timestamps,
-    )
-
-
-@mcp.tool()
-def youtube_get_comments(video_id: str, max_results: int = 20) -> list[dict[str, Any]]:
-    """Retrieve top comments on a video for sentiment evaluation or drafting responses.
-
-    Args:
-        video_id: The 11-character YouTube video ID.
-        max_results: Maximum comments to retrieve (default: 20).
-    """
-    return get_video_comments(video_id=video_id, max_results=max_results)
+    return server
 
 
-if __name__ == "__main__":
-    mcp.run()
+_default_server: FastMCP | None = None
+
+
+def __getattr__(name: str) -> Any:
+    """`mcp`: the server configured from the environment, built on first access."""
+    global _default_server
+    if name == "mcp":
+        if _default_server is None:
+            _default_server = build_server(Settings.from_env())
+        return _default_server
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
