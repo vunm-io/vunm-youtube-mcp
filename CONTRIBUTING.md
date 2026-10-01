@@ -8,23 +8,24 @@ Please be respectful, constructive, and collaborative in all communications.
 
 ## Development Setup
 
-1. Clone the repository:
+1. Install [uv](https://docs.astral.sh/uv/) and clone the repository:
    ```bash
    git clone https://github.com/vunm-io/vunm-youtube-mcp.git
    cd vunm-youtube-mcp
    ```
-
-2. Create a virtual environment and install dependencies:
+2. Install Python, the dependencies and the dev tools:
    ```bash
-   python3 -m venv .venv
-   source .venv/bin/activate
-   pip install -r requirements.txt
+   uv sync
+   ```
+3. Run the checks CI runs:
+   ```bash
+   uv run ruff check
+   uv run ruff format --check
+   uv run pytest
+   uv build
    ```
 
-3. Verify server startup:
-   ```bash
-   python -c "import sys; sys.path.insert(0, '.'); from src.server import mcp; import asyncio; print('Tools:', len(asyncio.run(mcp.list_tools())))"
-   ```
+Tests use the fakes in `tests/fakes.py` and never reach Google; please keep it that way, and use synthetic IDs and names in fixtures.
 
 ## Pull Request Guidelines
 
@@ -35,4 +36,5 @@ Please be respectful, constructive, and collaborative in all communications.
    - `chore: update dependencies`
 2. **One Logical Change per PR**: Keep PRs scoped, focused, and rebased onto `main`. Avoid merge commits.
 3. **No Secrets**: Never commit credentials, tokens, or personal identifiers. Ensure `.gitignore` remains intact.
-4. **Security**: For private vulnerability reports, please refer to [SECURITY.md](SECURITY.md).
+4. **Dependencies**: Pin new dependencies exactly in `pyproject.toml` and commit the updated `uv.lock`.
+5. **Security**: For private vulnerability reports, please refer to [SECURITY.md](SECURITY.md).

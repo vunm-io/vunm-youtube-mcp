@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "vunm-youtube-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "Custom Model Context Protocol (MCP) server for YouTube Studio analytics, video metadata management, and transcript extraction."
 readme = "README.md"
 license = "MIT"
