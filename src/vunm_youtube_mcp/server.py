@@ -1,20 +1,29 @@
 """The MCP server: tool definitions and their wiring to the Google APIs.
 
-`build_server(settings, provider)` returns a configured FastMCP server. Tests
-pass a fake provider; `serve` passes nothing and gets the Google one. Building
-a server does no network work; the first tool call loads the token.
+`build_server(settings, provider)` returns a FastMCP server with the tools of
+the mode. Tests pass a fake provider; `serve` passes nothing and gets the
+Google one. Building a server does no network work; the first tool call loads
+the token (or uses the API key in public mode).
+
+| Tool                                            | full | read-only | public |
+|-------------------------------------------------|------|-----------|--------|
+| channel_stats, analytics_report,                |  ✓   |     ✓     |   –    |
+| video_analytics, list_videos                    |      |           |        |
+| get_video, get_comments                         |  ✓   |     ✓     |   ✓    |
+| update_video                                    |  ✓   |     –     |   –    |
+| get_transcript, search_videos                   |  ✓   |     ✓     |   ✓    |
 """
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from typing import Annotated, Any, Literal
 
 from fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
-from vunm_youtube_mcp import __version__, analytics, studio, transcript
+from vunm_youtube_mcp import __version__, analytics, search, studio, transcript
 from vunm_youtube_mcp.config import Mode, Settings
 from vunm_youtube_mcp.errors import google_api_errors
 from vunm_youtube_mcp.services import GoogleServiceProvider, ServiceProvider
@@ -29,28 +38,30 @@ ReportDate = Annotated[
     Field(description="A calendar day as YYYY-MM-DD, in Pacific Time as YouTube reports it."),
 ]
 Dimension = Literal["day", "month", "country"]
-
 CategoryId = Annotated[
     str | None,
     Field(pattern=r"^[0-9]+$", description="Numeric video category ID, e.g. 27 (Education)."),
 ]
+SearchOrder = Literal["relevance", "date", "viewCount", "rating", "title"]
 
 READ = ToolAnnotations(read_only_hint=True, open_world_hint=True)
 WRITE = ToolAnnotations(
     read_only_hint=False, destructive_hint=True, idempotent_hint=True, open_world_hint=True
 )
 
+OAUTH_MODES = (Mode.FULL, Mode.READ_ONLY)
+
 INSTRUCTIONS = {
     Mode.FULL: (
         "Tools for the YouTube channel authorized on this machine: channel statistics, "
-        "analytics reports, uploads, video metadata, comments and transcripts. "
+        "analytics reports, uploads, video metadata, comments, transcripts and search. "
         "youtube_update_video previews by default: show the user the changes and "
         "warnings, and call it with dry_run=false only after they confirm. "
     ),
     Mode.READ_ONLY: (
         "Read-only tools for the YouTube channel authorized on this machine: channel "
-        "statistics, analytics reports, uploads, video metadata, comments and "
-        "transcripts. This server cannot change the channel. "
+        "statistics, analytics reports, uploads, video metadata, comments, transcripts "
+        "and search. This server cannot change the channel. "
     ),
     Mode.PUBLIC: (
         "Tools for public YouTube data, read with an API key: video details, comments, "
@@ -71,13 +82,24 @@ def build_server(
     """A server for `settings`, reaching Google through `provider` and fetching
     transcripts through `transcripts`; both default to the real backends."""
     provider = provider or GoogleServiceProvider(settings)
-    backends = transcripts or transcript.TranscriptBackends()
     mode = settings.mode
     server = FastMCP(
         name="vunm-youtube-mcp",
         instructions=INSTRUCTIONS[mode] + AUTH_INSTRUCTION,
         version=__version__,
     )
+    if mode in OAUTH_MODES:
+        _register_channel_tools(server, provider, mode)
+    _register_video_tools(server, provider, mode)
+    if mode is Mode.FULL:
+        _register_write_tools(server, provider, mode)
+    _register_transcript_tool(server, transcripts or transcript.TranscriptBackends())
+    _register_search_tool(server, provider, mode)
+    return server
+
+
+def _register_channel_tools(server: FastMCP, provider: ServiceProvider, mode: Mode) -> None:
+    """Tools that read the authorized channel's own data (OAuth modes)."""
     uploads_cache: dict[str, str] = {}
 
     def uploads_playlist() -> str:
@@ -139,6 +161,10 @@ def build_server(
         with google_api_errors(mode):
             return studio.list_videos(provider.data(), uploads_playlist(), max_results, page_token)
 
+
+def _register_video_tools(server: FastMCP, provider: ServiceProvider, mode: Mode) -> None:
+    """Tools that read one video; in public mode they see public data only."""
+
     @server.tool(title="Video details", annotations=READ)
     def youtube_get_video(video_id: VideoId) -> dict[str, Any]:
         """Metadata and settings of a video: title, full description, tags, category,
@@ -146,6 +172,64 @@ def build_server(
         with google_api_errors(mode):
             return studio.video_details(provider.data(), video_id)
 
+    @server.tool(title="Video comments", annotations=READ)
+    def youtube_get_comments(
+        video_id: VideoId,
+        max_results: Annotated[int, Field(ge=1, le=100, description="Comments to return.")] = 20,
+    ) -> list[dict[str, Any]]:
+        """Top-level comments on a video, most relevant first, as plain text, with like
+        and reply counts. Quota: 1 unit."""
+        with google_api_errors(mode):
+            return studio.video_comments(provider.data(), video_id, max_results)
+
+
+def _register_write_tools(server: FastMCP, provider: ServiceProvider, mode: Mode) -> None:
+    """The one tool that changes the channel (full mode)."""
+
+    @server.tool(title="Update video metadata", annotations=WRITE)
+    def youtube_update_video(
+        video_id: VideoId,
+        title: Annotated[
+            str | None, Field(description="New title: up to 100 characters, no < or >.")
+        ] = None,
+        description: Annotated[
+            str | None,
+            Field(description="New description: up to 5000 bytes (UTF-8), no < or >."),
+        ] = None,
+        tags: Annotated[
+            list[str] | None,
+            Field(
+                description="Replaces every tag. Up to 500 characters in total, where "
+                "commas count and a tag with a space counts as quoted."
+            ),
+        ] = None,
+        category_id: CategoryId = None,
+        privacy_status: Literal["public", "unlisted", "private"] | None = None,
+        dry_run: Annotated[
+            bool, Field(description="Preview only (the default); false writes the change.")
+        ] = True,
+    ) -> dict[str, Any]:
+        """Preview or apply a change to a video's title, description, tags,
+        category or privacy status. Fields left out keep their values.
+
+        With dry_run=true (the default) nothing is written: the result lists
+        `changes` (before and after), `warnings` (for example, the video becoming
+        public or tags being dropped) and `quota_cost`, the 50 units the write would
+        cost. Show these to the user and call again with dry_run=false only after
+        they confirm. Returns {changed: false} when nothing would change. A preview
+        costs 1 quota unit; applying costs 51."""
+        requested = {
+            "title": title,
+            "description": description,
+            "tags": tags,
+            "category_id": category_id,
+            "privacy_status": privacy_status,
+        }
+        with google_api_errors(mode):
+            return studio.update_video(provider.data(), video_id, requested, dry_run=dry_run)
+
+
+def _register_transcript_tool(server: FastMCP, backends: transcript.TranscriptBackends) -> None:
     @server.tool(title="Video transcript", annotations=READ)
     def youtube_get_transcript(
         video_id_or_url: Annotated[
@@ -181,61 +265,37 @@ def build_server(
             backends,
         )
 
-    @server.tool(title="Video comments", annotations=READ)
-    def youtube_get_comments(
-        video_id: VideoId,
-        max_results: Annotated[int, Field(ge=1, le=100, description="Comments to return.")] = 20,
-    ) -> list[dict[str, Any]]:
-        """Top-level comments on a video, most relevant first, as plain text, with like
-        and reply counts. Quota: 1 unit."""
+
+def _register_search_tool(server: FastMCP, provider: ServiceProvider, mode: Mode) -> None:
+    @server.tool(title="Search videos", annotations=READ)
+    def youtube_search_videos(
+        query: Annotated[str, Field(min_length=1, description="What to search for.")],
+        max_results: Annotated[int, Field(ge=1, le=25, description="Videos per page.")] = 10,
+        channel_id: Annotated[
+            str | None,
+            Field(pattern=r"^[A-Za-z0-9_-]+$", description="Only videos of this channel ID."),
+        ] = None,
+        order: SearchOrder = "relevance",
+        published_after: Annotated[
+            datetime | None,
+            Field(description="Only videos published after this time (RFC 3339; UTC if no zone)."),
+        ] = None,
+        page_token: Annotated[
+            str | None, Field(description="next_page_token from the previous page.")
+        ] = None,
+    ) -> dict[str, Any]:
+        """Search YouTube for videos. Returns {videos, next_page_token,
+        total_results} with title, description, channel and publish time per video;
+        use youtube_get_video for statistics and tags.
+
+        Quota: search has its own bucket of 100 calls a day per Google Cloud
+        project, and each page counts as one call. To list the authorized
+        channel's own uploads, use youtube_list_videos instead (2 units of the
+        shared 10,000)."""
         with google_api_errors(mode):
-            return studio.video_comments(provider.data(), video_id, max_results)
-
-    if mode is Mode.FULL:
-
-        @server.tool(title="Update video metadata", annotations=WRITE)
-        def youtube_update_video(
-            video_id: VideoId,
-            title: Annotated[
-                str | None, Field(description="New title: up to 100 characters, no < or >.")
-            ] = None,
-            description: Annotated[
-                str | None,
-                Field(description="New description: up to 5000 bytes (UTF-8), no < or >."),
-            ] = None,
-            tags: Annotated[
-                list[str] | None,
-                Field(
-                    description="Replaces every tag. Up to 500 characters in total, where "
-                    "commas count and a tag with a space counts as quoted."
-                ),
-            ] = None,
-            category_id: CategoryId = None,
-            privacy_status: Literal["public", "unlisted", "private"] | None = None,
-            dry_run: Annotated[
-                bool, Field(description="Preview only (the default); false writes the change.")
-            ] = True,
-        ) -> dict[str, Any]:
-            """Preview or apply a change to a video's title, description, tags,
-            category or privacy status. Fields left out keep their values.
-
-            With dry_run=true (the default) nothing is written: the result lists
-            `changes` (before and after), `warnings` (for example, the video becoming
-            public or tags being dropped) and `quota_cost`, the 50 units the write would
-            cost. Show these to the user and call again with dry_run=false only after
-            they confirm. Returns {changed: false} when nothing would change. A preview
-            costs 1 quota unit; applying costs 51."""
-            requested = {
-                "title": title,
-                "description": description,
-                "tags": tags,
-                "category_id": category_id,
-                "privacy_status": privacy_status,
-            }
-            with google_api_errors(mode):
-                return studio.update_video(provider.data(), video_id, requested, dry_run=dry_run)
-
-    return server
+            return search.search_videos(
+                provider.data(), query, max_results, channel_id, order, published_after, page_token
+            )
 
 
 _default_server: FastMCP | None = None

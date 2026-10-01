@@ -14,7 +14,7 @@ import sys
 from collections.abc import Sequence
 
 from vunm_youtube_mcp import __version__
-from vunm_youtube_mcp.config import ConfigError, Mode, Settings
+from vunm_youtube_mcp.config import ENV_API_KEY, ConfigError, Mode, Settings
 
 _LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 _README = "https://github.com/vunm-io/vunm-youtube-mcp#readme"
@@ -65,6 +65,11 @@ def configure_logging(level: str) -> None:
 def _serve(settings: Settings) -> int:
     from vunm_youtube_mcp.server import build_server
 
+    if settings.mode is Mode.PUBLIC and not settings.api_key:
+        logging.getLogger("vunm_youtube_mcp").warning(
+            "public mode without %s: every tool that calls the YouTube API will fail",
+            ENV_API_KEY,
+        )
     build_server(settings).run(transport="stdio", show_banner=False, log_level=settings.log_level)
     return 0
 
